@@ -57,13 +57,21 @@ class Player:
         self.address, self.client_id = "http://%s:%s" % (host, port), client_id
         self.ids = itertools.count(int(time.time()) % 1000000)
 
-    def send(self, path, params):
+    def send(self, path, params, timeout=8):
         query = urlencode(dict(params, commandID=next(self.ids)))
         request = Request("%s%s?%s" % (self.address, path, query), headers={
             "X-Plex-Client-Identifier": NAME, "X-Plex-Device-Name": NAME,
             "X-Plex-Target-Client-Identifier": self.client_id})
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=timeout) as response:
             return response.read()
+
+    def answers(self):
+        """False when the player's app is not serving requests, as on a Roku showing its screensaver."""
+        try:
+            self.send("/player/timeline/poll", {"wait": 0}, timeout=4)
+            return True
+        except OSError:
+            return False
 
     def video(self):
         """State and position (seconds) of the video the player has open. Asked twice: the first answer can be stale."""
@@ -90,6 +98,8 @@ def main():
     parser.add_argument("--offset", type=int, default=0, help="position to start at, in seconds")
     parser.add_argument("--seconds", type=float, default=15, help="how long to leave it playing")
     parser.add_argument("--expect", choices=("sheet", "no-sheet"), help="fail unless the server offers / does not offer a sheet")
+    parser.add_argument("--launch-url", help="URL to POST to open the player's Plex app when it does not answer, "
+                                             "for a Roku: http://<roku>:8060/launch/13535")
     args = parser.parse_args()
 
     began = time.time()
@@ -105,6 +115,19 @@ def main():
         sys.exit("Plex lists no player matching %r; its Plex app has to be open" % args.player)
     name = listed[0].get("name")
     player = Player(listed[0].get("host"), listed[0].get("port"), listed[0].get("machineIdentifier"))
+    if not player.answers():
+        if not args.launch_url:
+            sys.exit("%s is listed by Plex but does not answer (a Roku behind its screensaver does this); "
+                     "pass --launch-url to open its Plex app" % name)
+        say("%s does not answer; opening its Plex app" % name)
+        urlopen(Request(args.launch_url, data=b"", method="POST"), timeout=10).read()
+        waited = time.time()
+        while time.time() - waited < 30 and not player.answers():
+            time.sleep(1)
+        if not player.answers():
+            sys.exit("%s still does not answer %d s after opening its Plex app" % (name, time.time() - waited))
+        say("its Plex app answers after %.0f s" % (time.time() - waited))
+        time.sleep(3)
     state, _ = player.video()
     if state in ("playing", "paused", "buffering"):
         sys.exit("%s is %s something; not interrupting it" % (name, state))
