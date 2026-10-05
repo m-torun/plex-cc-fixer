@@ -116,17 +116,18 @@ def tidy(text):
 
 
 def wrap(text):
+    """Break a long cue into two lines at a space, as evenly as possible. Never inside a word."""
     if len(text) <= MAX_LINE:
         return text
     words = text.split()
-    best, best_diff = None, 1e9
+    best, best_cost = None, None
     for i in range(1, len(words)):
         a, b = " ".join(words[:i]), " ".join(words[i:])
-        if len(a) <= MAX_LINE and len(b) <= MAX_LINE and abs(len(a) - len(b)) < best_diff:
-            best_diff, best = abs(len(a) - len(b)), (a, b)
-    if best:
-        return best[0] + "\n" + best[1]
-    return text[:MAX_LINE] + "\n" + text[MAX_LINE:]
+        # Prefer both lines within the limit; among those, the most even pair.
+        cost = (max(len(a), len(b)) > MAX_LINE, abs(len(a) - len(b)))
+        if best_cost is None or cost < best_cost:
+            best_cost, best = cost, (a, b)
+    return best[0] + "\n" + best[1] if best else text
 
 
 def write_srt(path, cues):

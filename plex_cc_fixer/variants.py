@@ -24,9 +24,9 @@ def run(audio, start, duration, out_dir, model, device="cpu", compute="int8", pr
     for name, extra in VARIANTS:
         words = speech.asr_words(clip, model, device=device, compute=compute, prompt=prompt, log=lambda _m: None,
                                  **extra)
-        cues = speech.resegment(words)
-        captions.write_srt(os.path.join(out_dir, name + ".srt"), [(s, e, t) for s, e, t in cues])
-        covered = sum(e - s for s, e, _ in cues) / duration
+        cues = speech.settle(speech.resegment(words))
+        captions.write_srt(os.path.join(out_dir, name + ".srt"), [(c["start"], c["end"], c["text"]) for c in cues])
+        covered = sum(c["end"] - c["start"] for c in cues) / duration
         rows.append((name, str(len(words)), str(len(cues)), f"{covered:.0%}"))
         log(f"[done] {name}: {len(words)} words, {len(cues)} cues, {covered:.0%} covered")
 
