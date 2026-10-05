@@ -1,0 +1,11 @@
+[Unit]
+Description=plex-cc-fixer cheat sheets (static pages, no login; keep it on the local network)
+After=network.target
+
+[Service]
+User=mustafa
+ExecStart=/usr/bin/python3 -m http.server 8766 --directory /home/mustafa/plex-cc-fixer/site
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
