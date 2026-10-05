@@ -1,8 +1,6 @@
 import argparse
 import os
 import re
-import shutil
-import subprocess
 
 from . import captions, media, plex, speech, variants
 
@@ -10,25 +8,6 @@ from . import captions, media, plex, speech, variants
 def episode_code(path):
     m = re.search(r"S\d+E\d+", os.path.basename(path), re.IGNORECASE)
     return m.group(0).upper() if m else os.path.splitext(os.path.basename(path))[0]
-
-
-def install_sidecar(srt_path, media_path, log=print):
-    """Place the SRT next to the recording so Jellyfin and other sidecar-reading servers see it.
-    Never replaces an existing file; returns the sidecar path."""
-    dst = os.path.splitext(media_path)[0] + ".en.srt"
-    if os.path.exists(dst):
-        with open(srt_path, "rb") as a, open(dst, "rb") as b:
-            same = a.read() == b.read()
-        log(f"[sidecar] {os.path.basename(dst)} already exists"
-            + ("" if same else " with different content; left in place"))
-        return dst
-    try:
-        shutil.copyfile(srt_path, dst)
-    except PermissionError:
-        subprocess.run(["sudo", "-n", "cp", srt_path, dst], check=True)
-        subprocess.run(["sudo", "-n", "chown", "--reference", media_path, dst], check=True)
-    log(f"[sidecar] wrote {dst}")
-    return dst
 
 
 def cmd_episode(a):
@@ -68,8 +47,6 @@ def cmd_episode(a):
     if not a.no_plex:
         client = plex.PlexClient(a.plex_url, plex.load_token(a.plex_token_file))
         client.attach_srt(ts, out, f"{code}.en.srt")
-    if not a.no_sidecar:
-        install_sidecar(out, ts)
 
 
 def cmd_variants(a):
@@ -94,9 +71,7 @@ def main(argv=None):
     ep.add_argument("--compute", default="int8")
     ep.add_argument("--beam-size", type=int, default=1)
     ep.add_argument("--force", action="store_true", help="redo audio, captions and transcription")
-    ep.add_argument("--no-plex", action="store_true", help="do not attach the SRT to Plex")
-    ep.add_argument("--no-sidecar", action="store_true",
-                    help="do not copy the SRT next to the recording (needed by Jellyfin)")
+    ep.add_argument("--no-plex", action="store_true", help="write the SRT but do not attach it to Plex")
     ep.add_argument("--plex-url", default=os.environ.get("PLEX_URL", "http://localhost:32400"))
     ep.add_argument("--plex-token-file", default=None, help="file containing the Plex token (or set PLEX_TOKEN)")
     ep.set_defaults(func=cmd_episode)

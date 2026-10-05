@@ -29,7 +29,7 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
     --prompt "Show Name, Guest Name, Musical Guest"
 ```
 
-This writes the working files to `work/S01E02/`, attaches `S01E02.en.srt` to the Plex item whose media file is that `.ts` path, and copies the same SRT next to the recording as `Show - S01E02 - Title.en.srt` for Jellyfin and other servers that read sidecar files. Re-running the same command reuses the audio, caption extraction, and transcription, and it won't re-attach or overwrite a subtitle that's already there.
+This writes the working files to `work/S01E02/` and attaches `S01E02.en.srt` to the Plex item whose media file is that `.ts` path. Re-running the same command reuses the audio, caption extraction, and transcription, and it won't attach a subtitle that's already there.
 
 Useful options:
 
@@ -39,8 +39,7 @@ Useful options:
 | `--model` | Whisper model. `small.en` is the default, `medium.en` and `large-v3` are more accurate but slower. |
 | `--device`, `--compute` | For example `--device cuda --compute float16` on an NVIDIA GPU. |
 | `--audio-stream` | Absolute ffmpeg stream index. By default the first English track is used. |
-| `--no-plex` | Skip attaching to Plex. |
-| `--no-sidecar` | Skip copying the SRT next to the recording. |
+| `--no-plex` | Write the SRT only. |
 | `--force` | Redo audio, captions, and transcription. |
 
 Compare Whisper settings on a short clip, then rate the outputs by ear:
@@ -60,12 +59,13 @@ The subtitle is attached through Plex's subtitle upload endpoint (`POST /library
 - Set the server with `PLEX_URL` or `--plex-url` (default `http://localhost:32400`).
 - The tool matches the episode by its media file path, so it has to run on a machine where Plex sees the recording at that same path.
 
-Both are used because they reach different servers:
+The tool uploads the subtitle and doesn't write a sidecar `.srt` next to the recording:
 
-- **Plex** doesn't pick up sidecar subtitles for DVR recordings, so the subtitle is uploaded through the API.
-- **Jellyfin** (and other servers) only sees sidecar files, so the SRT is also copied next to the recording.
+- An uploaded subtitle shows up in Plex immediately and needs no write access to the library folder.
+- Plex does read sidecar files, but it was slow to register one placed next to an existing DVR recording: about ten minutes in one test, and not within eight hours in another.
+- Using both gives two identical tracks on the episode.
 
-Sidecar copies are placed with the same owner as the recording. If the folder isn't writable by your user, the tool uses `sudo -n`, which needs passwordless sudo for `cp` and `chown`. Otherwise run it as the owner of the library, or use `--no-sidecar`. Plex may list the sidecar and the uploaded subtitle as two English tracks for the same episode.
+An uploaded subtitle lives inside Plex and other media servers can't see it. If another server needs the subtitle, copy `work/<episode>/subtitle.en.srt` next to the recording as `<recording name>.en.srt`.
 
 ## How it works
 
