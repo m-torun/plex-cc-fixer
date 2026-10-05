@@ -81,7 +81,7 @@ def cmd_episode(a):
             for change in changes:
                 f.write(f"{captions.srt_ts(change['time'])} | {change['kind']} | {change['old']} -> {change['new']}\n")
         if a.site and facts:
-            print(f"[site] {brief.write_site(a.site, code, facts, changes)}")
+            print(f"[site] {brief.write_site(a.site, ts, code, facts, changes)}")
         print(f"[llm] reported cost of this run: ${claude.cost:.2f}")
 
     out = os.path.join(ep, f"subtitle.{label}.srt")
@@ -100,8 +100,13 @@ def cmd_brief(a):
     ts, code, ep, cues, _, _ = prepare(a)
     claude = llm.Claude(os.path.join(ep, "llm"), model=a.llm_model)
     facts = researched(a, ts, code, ep, cues, claude)
-    print(f"[site] {brief.write_site(a.site, code, facts)}")
+    print(f"[site] {brief.write_site(a.site, ts, code, facts)}")
     print(f"[llm] reported cost of this run: ${claude.cost:.2f}")
+
+
+def cmd_serve(a):
+    from . import server
+    server.serve(a.site, a.port, a.bind, a.plex_url, a.plex_token_file)
 
 
 def cmd_variants(a):
@@ -148,6 +153,14 @@ def main(argv=None):
     add_recording_arguments(br)
     br.add_argument("--site", required=True, help="folder to write the pages into; serve it with any static web server")
     br.set_defaults(func=cmd_brief)
+
+    sv = sub.add_parser("serve", help="web server for the cheat sheets, showing what Plex is playing now")
+    sv.add_argument("--site", required=True, help="folder holding the cheat sheet pages")
+    sv.add_argument("--port", type=int, default=8766)
+    sv.add_argument("--bind", default="0.0.0.0")
+    sv.add_argument("--plex-url", default=os.environ.get("PLEX_URL", "http://localhost:32400"))
+    sv.add_argument("--plex-token-file", default=None, help="file containing the Plex token (or set PLEX_TOKEN)")
+    sv.set_defaults(func=cmd_serve)
 
     vt = sub.add_parser("variants", help="transcribe one clip with several Whisper configurations")
     vt.add_argument("audio", help="audio or recording file")

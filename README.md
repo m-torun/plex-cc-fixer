@@ -58,10 +58,24 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
 
 - `--polish` first researches the episode on the web (segments, cast, names), then sends the cues to Claude in stretches of about 90, together with the broadcast captions for the same stretch as a second witness. Claude returns word corrections and the cues to split; nothing else in the subtitle changes. Every change is listed in `work/<episode>/changes.<variant>.en.txt`.
 - `--variant v2` names the result `S01E02.v2.en` in Plex and `subtitle.v2.en.srt` on disk, next to the plain version, so the two can be compared on the same episode.
-- `--site DIR` also writes the cheat sheet (`S01E02.html`), a page listing the corrections, and an `index.html` covering every episode in that folder. Serve the folder with any static web server; `deploy/plex-cc-fixer-site.service` is a systemd unit that does it with Python's built-in one on port 8766. The pages have no login, so keep the port on your local network.
+- `--site DIR` also writes the cheat sheet and a page listing the corrections into that folder (see below).
 - `python3 -m plex_cc_fixer brief "<recording>" --site DIR` writes the cheat sheet without touching subtitles.
 
 Answers from Claude are cached in `work/<episode>/llm/`, and the research in `research.json`, so a re-run costs nothing. `--refresh` redoes the research. The cheat sheet is best effort: it depends on recaps being published, and it can be wrong.
+
+### The cheat sheet server
+
+```bash
+python3 -m plex_cc_fixer.server --site /path/to/site --port 8766
+```
+
+The page at `/` asks Plex what is playing every few seconds. When the recording being played has a cheat sheet, it offers a button to open it; below that it lists every sheet. Open it on a phone while watching.
+
+- The site folder mirrors the library: the sheet for `.../Show (Year)/Season 52/Show (Year) - S52E02 - Title.ts` is `<site>/Show (Year)/Season 52/Show (Year) - S52E02 - Title.html`. That is how the server finds the sheet for what is playing, from the file path alone.
+- It needs the same Plex token and URL as the upload (`PLEX_TOKEN` or `--plex-token-file`, `--plex-url`).
+- It uses only the Python standard library. `deploy/plex-cc-fixer-site.service` is a systemd unit for it.
+- There is no login, and the page shows what is being watched. Keep the port on your local network.
+- `tools/live_check.py` tests it on a real player: it plays an item through Plex's remote-control protocol for a few seconds, checks that the server lists it, stops, and restores the watch state. The item shows on that player's screen while it runs.
 
 Compare Whisper settings on a short clip, then rate the outputs by ear:
 
@@ -120,10 +134,14 @@ plex_cc_fixer/
   llm.py        runs the `claude` CLI and caches its answers
   polish.py     the editing pass: prompt, word corrections, cue splits
   brief.py      web research and the cheat sheet pages
-  plex.py       Plex search and subtitle upload
+  sheets.py     where the pages live in the site folder, and their shared style
+  server.py     web server: what Plex is playing now, and its sheet
+  plex.py       Plex search, subtitle upload, current sessions
   variants.py   configuration comparison on a clip
 deploy/
-  plex-cc-fixer-site.service   systemd unit serving the cheat sheet folder
+  plex-cc-fixer-site.service   systemd unit for the cheat sheet server
+tools/
+  live_check.py                tests the server against a real player
 ```
 
 ## License

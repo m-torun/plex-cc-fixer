@@ -1,11 +1,12 @@
 """Research an episode on the web and write a spoiler-free cheat sheet as a small static site."""
 import datetime
-import glob
 import html
 import json
 import os
+import urllib.parse
 
 from .captions import srt_ts
+from .sheets import clock, page, relative_page
 
 KINDS = ["cold open", "monologue", "sketch", "pretaped", "news desk", "music", "interview", "goodnights", "other"]
 
@@ -117,50 +118,6 @@ def research(cues, identity, claude, log=print):
     return facts
 
 
-STYLE = """
-:root { color-scheme: light dark; --bg: #fbfaf7; --fg: #1d1c1a; --dim: #6b6862; --line: #e2dfd8; --card: #ffffff; --accent: #9a3412; }
-@media (prefers-color-scheme: dark) { :root { --bg: #141312; --fg: #ece9e3; --dim: #a09c94; --line: #2e2c29; --card: #1d1c1a; --accent: #fdba74; } }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.5 -apple-system, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
-main { max-width: 42rem; margin: 0 auto; padding: 1.25rem 1rem 4rem; }
-h1 { font-size: 1.45rem; line-height: 1.25; margin: 0 0 .25rem; }
-h2 { font-size: 1.15rem; line-height: 1.3; margin: 0; }
-p { margin: .5rem 0; }
-a { color: var(--accent); }
-.dim { color: var(--dim); font-size: .9rem; }
-nav { margin: 1rem 0 .5rem; border-top: 1px solid var(--line); }
-nav a { display: flex; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--line); color: var(--fg); text-decoration: none; }
-nav .when { flex: 0 0 4.1rem; }
-.seg { scroll-margin-top: .5rem; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: .9rem 1rem; margin: 1rem 0; }
-.when { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; font-size: .95rem; }
-.kind { color: var(--dim); font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }
-dl { margin: .6rem 0 0; }
-dt { font-weight: 600; margin-top: .6rem; }
-dd { margin: .1rem 0 0; }
-ul { padding-left: 1.2rem; margin: .4rem 0; }
-details { margin-top: .6rem; }
-summary { color: var(--dim); font-size: .9rem; cursor: pointer; }
-table { border-collapse: collapse; width: 100%; font-size: .95rem; }
-td { border-top: 1px solid var(--line); padding: .45rem .3rem; vertical-align: top; }
-td.t { white-space: nowrap; color: var(--accent); font-variant-numeric: tabular-nums; }
-del { color: var(--dim); }
-"""
-
-
-def page(title, body):
-    return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            f"<title>{html.escape(title)}</title><style>{STYLE}</style></head>"
-            f"<body><main>{body}</main></body></html>\n")
-
-
-def clock(value):
-    """Show 0:12:40 as 12:40 and 1:02:03 unchanged."""
-    total = int(value)
-    hours, minutes, secs = total // 3600, total % 3600 // 60, total % 60
-    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
-
-
 def render_brief(code, facts, changes_page=None):
     e = html.escape
     episode = facts.get("episode", {})
@@ -198,11 +155,11 @@ def render_brief(code, facts, changes_page=None):
     footer = f"<p class=\"dim\">Made {datetime.date.today().isoformat()} by plex-cc-fixer. Best effort; it can be wrong."
     if changes_page:
         footer += f" <a href=\"{e(changes_page, quote=True)}\">Subtitle corrections</a>."
-    body.append(footer + " <a href=\"index.html\">All episodes</a></p>")
+    body.append(footer + " <a href=\"/\">Now playing and all sheets</a></p>")
     return page(f"{heading}: before you watch", "".join(body))
 
 
-def render_changes(code, changes):
+def render_changes(code, changes, sheet_page):
     e = html.escape
     rows = []
     for change in changes:
@@ -215,30 +172,20 @@ def render_changes(code, changes):
     body = (f"<h1>{e(code)}: subtitle corrections</h1>"
             f"<p class=\"dim\">{words} words corrected and {len(changes) - words} cues split by the editing pass. "
             "This page quotes the dialogue, so it can spoil jokes.</p>"
-            f"<table>{''.join(rows)}</table><p class=\"dim\"><a href=\"{e(code)}.html\">Back to the cheat sheet</a></p>")
+            f"<table>{''.join(rows)}</table><p class=\"dim\"><a href=\"{e(sheet_page, quote=True)}\">Back to the cheat sheet</a></p>")
     return page(f"{code}: subtitle corrections", body)
 
 
-def write_site(site, code, facts, changes=None):
-    """Write the episode's pages into `site` and rebuild the index from every episode found there."""
-    os.makedirs(site, exist_ok=True)
-    changes_page = f"{code}-changes.html" if changes else None
-    with open(os.path.join(site, f"{code}.json"), "w", encoding="utf-8") as f:
-        json.dump(facts, f, indent=1)
-    with open(os.path.join(site, f"{code}.html"), "w", encoding="utf-8") as f:
-        f.write(render_brief(code, facts, changes_page))
+def write_site(site, media_path, code, facts, changes=None):
+    """Write the episode's pages into `site`, at the place that mirrors the media file's place in the library."""
+    base = os.path.join(site, relative_page(media_path))
+    os.makedirs(os.path.dirname(base), exist_ok=True)
+    name = urllib.parse.quote(os.path.basename(base))
+    with open(base + ".json", "w", encoding="utf-8") as f:
+        json.dump(dict(facts, code=code, media=os.path.basename(media_path)), f, indent=1)
+    with open(base + ".html", "w", encoding="utf-8") as f:
+        f.write(render_brief(code, facts, name + ".changes.html" if changes else None))
     if changes:
-        with open(os.path.join(site, changes_page), "w", encoding="utf-8") as f:
-            f.write(render_changes(code, changes))
-    items = []
-    for path in sorted(glob.glob(os.path.join(site, "*.json")), reverse=True):
-        name = os.path.basename(path)[:-5]
-        with open(path, encoding="utf-8") as f:
-            episode = json.load(f).get("episode", {})
-        people = " / ".join(x for x in (episode.get("host"), episode.get("musical_guest")) if x)
-        items.append(f"<section class=\"seg\"><h2><a href=\"{html.escape(name, quote=True)}.html\">"
-                     f"{html.escape(' · '.join(x for x in (episode.get('show'), name) if x))}</a></h2>"
-                     f"<p class=\"dim\">{html.escape(people)}</p></section>")
-    with open(os.path.join(site, "index.html"), "w", encoding="utf-8") as f:
-        f.write(page("Before you watch", "<h1>Before you watch</h1><p class=\"dim\">Spoiler-free background for recorded episodes.</p>" + "".join(items)))
-    return os.path.join(site, f"{code}.html")
+        with open(base + ".changes.html", "w", encoding="utf-8") as f:
+            f.write(render_changes(code, changes, name + ".html"))
+    return base + ".html"

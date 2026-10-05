@@ -22,9 +22,44 @@ class PlexClient:
         q = dict(params or {}, **{"X-Plex-Token": self.token})
         return f"{self.url}{path}?{urllib.parse.urlencode(q)}"
 
-    def _get_xml(self, path, params=None):
-        with urllib.request.urlopen(self._url(path, params), timeout=60) as r:
+    def _get_xml(self, path, params=None, timeout=60):
+        with urllib.request.urlopen(self._url(path, params), timeout=timeout) as r:
             return ET.fromstring(r.read())
+
+    def sessions(self):
+        """What is playing now: one dict per session with the item's names, its media file and the player."""
+        playing = []
+        for item in self._get_xml("/status/sessions", timeout=5):
+            player = item.find("Player")
+            if player is None:
+                continue
+            part = item.find("Media/Part")
+            path = part.get("file") if part is not None else None
+            if not path and item.get("ratingKey"):
+                path = self._media_file(item.get("ratingKey"))
+            playing.append({
+                "type": item.get("type"),
+                "title": item.get("title"),
+                "show": item.get("grandparentTitle"),
+                "season": item.get("parentIndex"),
+                "episode": item.get("index"),
+                "year": item.get("year"),
+                "file": path,
+                "offset_ms": int(item.get("viewOffset") or 0),
+                "duration_ms": int(item.get("duration") or 0),
+                "player": player.get("title"),
+                "product": player.get("product"),
+                "state": player.get("state"),
+            })
+        return playing
+
+    def _media_file(self, rating_key):
+        """The media file of a library item; remembered, since a session is asked about every few seconds."""
+        cache = self.__dict__.setdefault("_files", {})
+        if rating_key not in cache:
+            part = self._get_xml(f"/library/metadata/{rating_key}", timeout=5).find(".//Part")
+            cache[rating_key] = part.get("file") if part is not None else None
+        return cache[rating_key]
 
     def find_rating_key(self, media_path, title):
         terms = [title] + [p.strip() for p in title.split(";")]

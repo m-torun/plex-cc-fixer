@@ -1,10 +1,11 @@
 [Unit]
-Description=plex-cc-fixer cheat sheets (static pages, no login; keep it on the local network)
-After=network.target
+Description=plex-cc-fixer cheat sheets and now-playing page (no login; keep it on the local network)
+After=network.target plexmediaserver.service
 
 [Service]
 User=mustafa
-ExecStart=/usr/bin/python3 -m http.server 8766 --directory /home/mustafa/plex-cc-fixer/site
+WorkingDirectory=/home/mustafa/code/plex-cc-fixer
+ExecStart=/usr/bin/python3 -m plex_cc_fixer.server --site /home/mustafa/plex-cc-fixer/site --port 8766
 Restart=on-failure
 
 [Install]
