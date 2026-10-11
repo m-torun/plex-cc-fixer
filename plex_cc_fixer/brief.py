@@ -155,7 +155,7 @@ def render_brief(code, facts, changes_page=None):
     footer = f"<p class=\"dim\">Made {datetime.date.today().isoformat()} by plex-cc-fixer. Best effort; it can be wrong."
     if changes_page:
         footer += f" <a href=\"{e(changes_page, quote=True)}\">Subtitle corrections</a>."
-    body.append(footer + " <a href=\"/\">Now playing and all sheets</a></p>")
+    body.append(footer + "</p>")
     return page(f"{heading}: before you watch", "".join(body))
 
 

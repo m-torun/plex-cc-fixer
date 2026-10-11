@@ -47,6 +47,7 @@ Useful options:
 | `--audio-stream` | Absolute ffmpeg stream index. By default the first English track is used. |
 | `--max-chars` | Longest cue in characters. The default, 42, gives one short line that appears close to when it's spoken. 84 gives two-line cues. |
 | `--no-plex` | Write the SRT only. |
+| `--threads` | CPU threads for Whisper. Fewer keeps the machine responsive. |
 | `--force` | Redo audio, captions, and transcription. |
 
 ### Editing pass and cheat sheet
@@ -58,24 +59,33 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
 
 - `--polish` first researches the episode on the web (segments, cast, names), then sends the cues to Claude in stretches of about 90, together with the broadcast captions for the same stretch as a second witness. Claude returns word corrections and the cues to split; nothing else in the subtitle changes. Every change is listed in `work/<episode>/changes.<variant>.en.txt`.
 - `--variant v2` names the result `S01E02.v2.en` in Plex and `subtitle.v2.en.srt` on disk, next to the plain version, so the two can be compared on the same episode.
-- `--site DIR` also writes the cheat sheet and a page listing the corrections into that folder (see below).
+- `--site DIR` also writes the cheat sheet and a page listing the corrections into that folder, for the daemon to serve (see below).
 - `python3 -m plex_cc_fixer brief "<recording>" --site DIR` writes the cheat sheet without touching subtitles.
 
 Answers from Claude are cached in `work/<episode>/llm/`, and the research in `research.json`, so a re-run costs nothing. `--refresh` redoes the research. The cheat sheet is best effort: it depends on recaps being published, and it can be wrong.
 
-### The cheat sheet server
+### The daemon
 
 ```bash
-python3 -m plex_cc_fixer.server --site /path/to/site --port 8766
+python3 -m plex_cc_fixer.server --site /path/to/site --work /path/to/work --port 8766
 ```
 
-The page at `/` asks Plex what is playing every few seconds. When the recording being played has a cheat sheet, it offers a button to open it; below that it lists every sheet. Open it on a phone while watching.
+A long-running service with an HTTP API and no page of its own. An interface talks to it; [plex-buddy](https://github.com/m-torun/plex-buddy) is one, and puts it on the same page as the audio offset control of [plex-audio-offset](https://github.com/m-torun/plex-audio-offset).
 
-- The site folder mirrors the library: the sheet for `.../Show (Year)/Season 52/Show (Year) - S52E02 - Title.ts` is `<site>/Show (Year)/Season 52/Show (Year) - S52E02 - Title.html`. That is how the server finds the sheet for what is playing, from the file path alone.
-- It needs the same Plex token and URL as the upload (`PLEX_TOKEN` or `--plex-token-file`, `--plex-url`).
-- It uses only the Python standard library. `deploy/plex-cc-fixer-site.service` is a systemd unit for it.
-- There is no login, and the page shows what is being watched. Keep the port on your local network.
-- `tools/live_check.py` tests it on a real player: it plays an item through Plex's remote-control protocol for a few seconds, checks that the server lists it, stops, and restores the watch state. The item shows on that player's screen while it runs.
+| Request | Does |
+| --- | --- |
+| `GET /api/now` | What Plex is playing: title, player, state, position, and the URL of the item's cheat sheet if it has one. |
+| `GET /api/recordings` | The 15 newest recordings: whether each has a subtitle and a cheat sheet, and its latest generation job. |
+| `POST /api/jobs` | `{"key": "<Plex ratingKey>"}` starts `episode --polish --site` for that recording. One job runs at a time; more wait their turn. |
+| `POST /api/jobs/cancel` | `{"id": <job id>}` |
+| `GET /<path>.html` | The cheat sheet pages, as files from the site folder. |
+
+- The site folder mirrors the library: the sheet for `.../Show (Year)/Season 52/Show (Year) - S52E02 - Title.ts` is `<site>/Show (Year)/Season 52/Show (Year) - S52E02 - Title.html`. That is how the sheet for what is playing is found, from the file path alone.
+- A job runs the pipeline as a separate process at low priority, with Whisper held to `--threads` cores (default 3), and takes the Whisper prompt from the show and episode titles. Work files go under `<work>/<show folder>/<episode>`; job logs and history under `<work>/jobs/`.
+- It needs the same Plex token and URL as the upload (`PLEX_TOKEN` or `--plex-token-file`, `--plex-url`), and the `claude` CLI for the editing pass and the cheat sheet.
+- It listens on `127.0.0.1` and has no login. `--listen 0.0.0.0` exposes it; then anyone who can reach the port can see what is being watched and start a job.
+- The server itself uses only the Python standard library. `deploy/plex-cc-fixer.service` is a systemd unit for it.
+- `tools/live_check.py` tests `/api/now` on a real player: it plays an item through Plex's remote-control protocol for a few seconds, checks that the daemon lists it, stops, and restores the watch state. The item shows on that player's screen while it runs.
 
 Compare Whisper settings on a short clip, then rate the outputs by ear:
 
@@ -135,13 +145,13 @@ plex_cc_fixer/
   polish.py     the editing pass: prompt, word corrections, cue splits
   brief.py      web research and the cheat sheet pages
   sheets.py     where the pages live in the site folder, and their shared style
-  server.py     web server: what Plex is playing now, and its sheet
-  plex.py       Plex search, subtitle upload, current sessions
+  server.py     the daemon: API, cheat sheet pages, generation jobs
+  plex.py       Plex search, subtitle upload, current sessions, recent recordings
   variants.py   configuration comparison on a clip
 deploy/
-  plex-cc-fixer-site.service   systemd unit for the cheat sheet server
+  plex-cc-fixer.service        systemd unit for the daemon
 tools/
-  live_check.py                tests the server against a real player
+  live_check.py                tests the daemon against a real player
 ```
 
 ## License

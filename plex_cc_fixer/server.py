@@ -1,12 +1,23 @@
-"""Web server for the cheat sheets: shows what Plex is playing now and offers that recording's sheet.
+"""The plex-cc-fixer daemon: an HTTP API and the cheat sheet pages, with no interface of its own.
 
-  python3 -m plex_cc_fixer.server --site DIR [--port 8766]
+  python3 -m plex_cc_fixer.server --site DIR --work DIR [--port 8766]
 
-Standard library only. It has no login: keep the port on your local network.
+  GET  /api/now           what Plex is playing, and each item's cheat sheet if it has one
+  GET  /api/recordings    the newest recordings: subtitles yes/no, cheat sheet, generation job
+  POST /api/jobs          {"key": "<ratingKey>"} start subtitle and cheat sheet generation
+  POST /api/jobs/cancel   {"id": <job id>}
+  GET  /<path>            the cheat sheet pages, as files from the site folder
+
+An interface (plex-buddy) talks to this. It listens on 127.0.0.1 by default and has no
+login. Standard library only; generation runs the pipeline as a separate process.
 """
 import argparse
 import functools
 import json
+import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -14,138 +25,307 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from . import plex, sheets
 
-HOME_BODY = """
-<h1>Before you watch</h1>
-<p class="dim">Spoiler-free background for what you are about to watch.</p>
-<h3>Now playing in Plex</h3>
-<div id="now"><p class="dim">Checking…</p></div>
-<h3>All cheat sheets</h3>
-<div id="all"><p class="dim">Loading…</p></div>
-"""
-
-HOME_SCRIPT = """<script>
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
-const clock = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
-  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(r).padStart(2, "0"); };
-
-async function now() {
-  const box = document.getElementById("now");
-  try {
-    const data = await (await fetch("/api/now", {cache: "no-store"})).json();
-    if (data.error) { box.innerHTML = '<p class="dim">Plex cannot be reached right now.</p>'; return; }
-    if (!data.playing.length) { box.innerHTML = '<p class="dim">Nothing is playing.</p>'; return; }
-    box.innerHTML = data.playing.map((p) => {
-      const where = [p.player, p.state, p.duration ? clock(p.position) + " of " + clock(p.duration) : ""].filter(Boolean).join(" · ");
-      const sheet = p.sheet
-        ? '<a class="button" href="' + esc(p.sheet) + '">Open the cheat sheet</a>'
-        : '<p class="dim">No cheat sheet has been made for this one.</p>';
-      return '<section class="seg"><h2>' + esc(p.label) + '</h2><p class="dim">' + esc(where) + '</p>' + sheet + '</section>';
-    }).join("");
-  } catch (error) {
-    box.innerHTML = '<p class="dim">This page lost its connection to the server.</p>';
-  }
-}
-
-async function all() {
-  const box = document.getElementById("all");
-  try {
-    const list = await (await fetch("/api/sheets", {cache: "no-store"})).json();
-    box.innerHTML = list.length ? "<nav>" + list.map((s) =>
-      '<a href="' + esc(s.url) + '"><span>' + esc(s.label) + (s.people ? '<br><span class="dim">' + esc(s.people) + '</span>' : '') + '</span></a>').join("") + "</nav>"
-      : '<p class="dim">None yet.</p>';
-  } catch (error) {}
-}
-
-now(); all();
-setInterval(now, 5000);
-setInterval(all, 60000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { now(); all(); } });
-</script>"""
+KEPT_JOBS = 30
+STEPS = (  # the pipeline's log lines, in order, and what is happening once each has been seen
+    ("[asr]", "Transcribing speech"),
+    ("[align]", "Merging the broadcast captions"),
+    ("[captions]", "Researching the episode on the web"),
+    ("[research]", "Correcting words and timing punchlines"),
+    ("[polish]", "Writing the cheat sheet"),
+    ("[srt]", "Attaching the subtitle in Plex"),
+    ("[plex]", "Finishing"),
+)
 
 
-def describe(session):
-    """A one-line name for what a session is playing."""
-    if session.get("show"):
+def describe(item):
+    """A one-line name for a session or a recording."""
+    if item.get("show"):
         number = ""
-        if session.get("season") and session.get("episode"):
-            number = "S%02dE%02d" % (int(session["season"]), int(session["episode"]))
-        return " · ".join(x for x in (session["show"], number, session.get("title")) if x)
-    return " ".join(x for x in (session.get("title"), "(%s)" % session["year"] if session.get("year") else "") if x)
+        if item.get("season") and item.get("episode"):
+            number = "S%02dE%02d" % (int(item["season"]), int(item["episode"]))
+        title = item.get("title") if item.get("title") != item["show"] else ""  # news shows repeat the show's name
+        return " · ".join(x for x in (item["show"], number, title) if x)
+    return " ".join(x for x in (item.get("title"), "(%s)" % item["year"] if item.get("year") else "") if x)
 
 
-class NowPlaying:
-    """What Plex is playing, asked at most every couple of seconds however many pages are open."""
+class Cached:
+    """Calls `make` at most every `max_age` seconds, however many requests ask."""
 
-    def __init__(self, client, site, max_age=2.0):
-        self.client, self.site, self.max_age = client, site, max_age
+    def __init__(self, make, max_age):
+        self.make, self.max_age = make, max_age
+        self.lock, self.at, self.value = threading.Lock(), 0.0, None
+
+    def get(self):
+        with self.lock:
+            if self.value is None or time.time() - self.at >= self.max_age:
+                self.value, self.at = self.make(), time.time()
+            return self.value
+
+    def expire(self):
+        with self.lock:
+            self.at = 0.0
+
+
+class Jobs:
+    """Runs the pipeline for one recording at a time and remembers how each run went."""
+
+    def __init__(self, work, site, threads=3):
+        self.work, self.site, self.threads = work, site, threads
+        self.folder = os.path.join(work, "jobs")
+        os.makedirs(self.folder, exist_ok=True)
+        self.history = os.path.join(self.folder, "history.json")
         self.lock = threading.Lock()
-        self.at, self.value = 0.0, {"playing": [], "error": None}
+        self.wake = threading.Condition(self.lock)
+        self.process = None
+        try:
+            with open(self.history, encoding="utf-8") as f:
+                self.jobs = json.load(f)
+        except (OSError, ValueError):
+            self.jobs = []
+        for job in self.jobs:  # whatever was under way when the daemon last stopped did not finish
+            if job["state"] in ("queued", "running"):
+                job.update(state="failed", error="The service was restarted while this was running.", finished=time.time())
+        threading.Thread(target=self.worker, daemon=True).start()
+
+    def save(self):
+        self.jobs = self.jobs[-KEPT_JOBS:]
+        with open(self.history + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(self.jobs, f, indent=1)
+        os.replace(self.history + ".tmp", self.history)
+
+    def start(self, recording):
+        with self.lock:
+            for job in self.jobs:
+                if job["file"] == recording["file"] and job["state"] in ("queued", "running"):
+                    return job
+            job = {
+                "id": int(time.time() * 1000), "key": recording["key"], "file": recording["file"],
+                "label": describe(recording), "show": recording.get("show") or "",
+                "title": recording.get("title") or "", "duration": recording["duration_ms"] / 1000.0,
+                "state": "queued", "step": "Waiting for another job to finish", "progress": None,
+                "queued": time.time(), "started": None, "finished": None, "error": "",
+            }
+            self.jobs.append(job)
+            self.save()
+            self.wake.notify()
+            return job
+
+    def cancel(self, job_id):
+        with self.lock:
+            for job in self.jobs:
+                if job["id"] == job_id and job["state"] in ("queued", "running"):
+                    if job["state"] == "running" and self.process:
+                        os.killpg(self.process.pid, signal.SIGTERM)
+                    job.update(state="cancelled", finished=time.time(), step="", progress=None)
+                    self.save()
+                    return job
+        raise KeyError("no such job under way")
 
     def snapshot(self):
         with self.lock:
-            if time.time() - self.at < self.max_age:
-                return self.value
-            try:
-                playing = []
-                for session in self.client.sessions():
-                    playing.append({
-                        "label": describe(session),
-                        "player": session.get("player") or session.get("product") or "",
-                        "state": session.get("state") or "",
-                        "position": (session.get("offset_ms") or 0) / 1000.0,
-                        "duration": (session.get("duration_ms") or 0) / 1000.0,
-                        "sheet": sheets.sheet_for(self.site, session["file"]) if session.get("file") else None,
-                    })
-                self.value = {"playing": playing, "error": None}
-            except Exception as error:  # Plex down, token wrong, odd reply: the page says so and keeps polling
-                self.value = {"playing": [], "error": str(error)[:200]}
-            self.at = time.time()
-            return self.value
+            return [dict(job) for job in self.jobs]
+
+    def latest_for(self, path):
+        """The most recent job for a recording, or None."""
+        with self.lock:
+            for job in reversed(self.jobs):
+                if job["file"] == path:
+                    return dict(job)
+        return None
+
+    def command(self, job):
+        show_folder = os.path.basename(os.path.dirname(os.path.dirname(job["file"]))) or "recordings"
+        prompt = ", ".join(x.strip() for x in [job["show"]] + job["title"].split(";") if x.strip())
+        return ["nice", "-n", "10", sys.executable, "-u", "-m", "plex_cc_fixer", "episode", job["file"],
+                "--work", os.path.join(self.work, show_folder), "--prompt", prompt,
+                "--threads", str(self.threads), "--polish", "--site", self.site]
+
+    def worker(self):
+        while True:
+            with self.lock:
+                job = next((j for j in self.jobs if j["state"] == "queued"), None)
+                while job is None:
+                    self.wake.wait()
+                    job = next((j for j in self.jobs if j["state"] == "queued"), None)
+                job.update(state="running", started=time.time(), step="Extracting audio and captions", progress=0.0)
+                self.save()
+            self.run(job)
+
+    def run(self, job):
+        log_path = os.path.join(self.folder, "%d.log" % job["id"])
+        env = dict(os.environ, PATH=os.path.expanduser("~/.local/bin") + os.pathsep + os.environ.get("PATH", ""))
+        last = ""
+        try:
+            with open(log_path, "w", encoding="utf-8") as log:
+                process = subprocess.Popen(
+                    self.command(job), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    start_new_session=True)
+                with self.lock:
+                    self.process = process
+                for line in process.stdout:
+                    log.write(line)
+                    log.flush()
+                    if line.strip():
+                        last = line.strip()
+                    self.follow(job, line)
+                code = process.wait()
+        except OSError as error:
+            code, last = 1, str(error)
+        with self.lock:
+            self.process = None
+            if job["state"] == "running":
+                if code == 0:
+                    job.update(state="done", step="", progress=1.0)
+                else:
+                    job.update(state="failed", step="", progress=None, error=last[-300:] or "exit code %d" % code)
+                job["finished"] = time.time()
+            self.save()
+
+    def follow(self, job, line):
+        """Move the job's step and progress along from one line of the pipeline's log."""
+        with self.lock:
+            if job["state"] != "running":
+                return
+            for marker, step in STEPS:
+                if line.startswith(marker):
+                    job["step"] = step
+            if line.startswith("[asr]") and line.rstrip().endswith("s") and job["duration"]:
+                try:  # "[asr]   1234.5s": transcription is nearly all of the first half of the run
+                    job["progress"] = min(0.6, 0.6 * float(line[5:].strip()[:-1]) / job["duration"])
+                except ValueError:
+                    pass
+            elif line.startswith("[captions]"):
+                job["progress"] = 0.62
+            elif line.startswith("[research]"):
+                job["progress"] = 0.85
+            elif line.startswith("[polish]"):
+                job["progress"] = 0.97
+
+
+class Daemon:
+    def __init__(self, client, site, work, threads):
+        self.client, self.site = client, site
+        self.jobs = Jobs(work, site, threads)
+        self.now = Cached(self.read_now, 2.0)
+        self.recent = Cached(self.read_recent, 20.0)
+
+    def read_now(self):
+        try:
+            playing = []
+            for session in self.client.sessions():
+                playing.append({
+                    "key": session.get("key"), "client": session.get("client"), "label": describe(session),
+                    "player": session.get("player") or session.get("product") or "",
+                    "state": session.get("state") or "",
+                    "position": (session.get("offset_ms") or 0) / 1000.0,
+                    "duration": (session.get("duration_ms") or 0) / 1000.0,
+                    "sheet": sheets.sheet_for(self.site, session["file"]) if session.get("file") else None,
+                })
+            return {"playing": playing, "error": None}
+        except Exception as error:  # Plex down, token wrong, odd reply: say so and keep answering
+            return {"playing": [], "error": str(error)[:200]}
+
+    def read_recent(self):
+        try:
+            found = self.client.recent(15)
+            for recording in found:
+                recording["subtitles"] = self.client.has_subtitle(recording["key"])
+            return found, None
+        except Exception as error:
+            return [], str(error)[:200]
+
+    def recordings(self):
+        found, error = self.recent.get()
+        rows = []
+        for recording in found:
+            rows.append({
+                "key": recording["key"], "label": describe(recording), "added": recording["added"],
+                "duration": recording["duration_ms"] / 1000.0, "subtitles": recording["subtitles"],
+                "sheet": sheets.sheet_for(self.site, recording["file"]),
+                "job": self.jobs.latest_for(recording["file"]),
+            })
+        return {"recordings": rows, "error": error}
+
+    def start_job(self, key):
+        found, error = self.recent.get()
+        for recording in found:
+            if recording["key"] == str(key):
+                job = self.jobs.start(recording)
+                self.recent.expire()
+                return job
+        raise KeyError(error or "that recording is not among the newest ones")
 
 
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/", "/index.html"):
-            return self.reply(sheets.page("Before you watch", HOME_BODY, HOME_SCRIPT).encode(), "text/html; charset=utf-8")
+        daemon = self.server.app
         if path == "/api/now":
-            return self.reply(json.dumps(self.server.now.snapshot()).encode(), "application/json")
-        if path == "/api/sheets":
-            return self.reply(json.dumps(sheets.list_sheets(self.server.site)).encode(), "application/json")
+            return self.reply(200, daemon.now.get())
+        if path == "/api/recordings":
+            return self.reply(200, daemon.recordings())
+        if path == "/api/jobs":
+            return self.reply(200, daemon.jobs.snapshot())
+        if path in ("/", "/index.html"):
+            return self.reply(200, {"service": "plex-cc-fixer", "interface": "plex-buddy"})
+        if path.startswith("/api/"):
+            return self.reply(404, {"error": "not found"})
         return super().do_GET()
 
-    def reply(self, body, content_type):
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
+    def do_POST(self):
+        daemon = self.server.app
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 4096:
+                raise ValueError("request too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/api/jobs":
+                return self.reply(200, daemon.start_job(body["key"]))
+            if self.path == "/api/jobs/cancel":
+                job = daemon.jobs.cancel(int(body["id"]))
+                daemon.recent.expire()
+                return self.reply(200, job)
+            return self.reply(404, {"error": "not found"})
+        except KeyError as error:
+            return self.reply(404, {"error": str(error.args[0]) if error.args else "not found"})
+        except (ValueError, TypeError) as error:
+            return self.reply(400, {"error": str(error)})
+
+    def reply(self, status, data):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
     def log_message(self, format, *args):
-        # Pages poll every few seconds; only problems are worth a log line.
-        if args and str(args[1] if len(args) > 1 else "").startswith(("4", "5")):
+        # Interfaces poll every few seconds; only problems are worth a log line.
+        if len(args) > 1 and str(args[1]).startswith(("4", "5")):
             super().log_message(format, *args)
 
 
-def serve(site, port=8766, bind="0.0.0.0", plex_url="http://localhost:32400", token_file=None):
+def serve(site, work, port=8766, listen="127.0.0.1", plex_url="http://localhost:32400", token_file=None, threads=3):
     client = plex.PlexClient(plex_url, plex.load_token(token_file))
-    server = ThreadingHTTPServer((bind, port), functools.partial(Handler, directory=site))
-    server.site = site
-    server.now = NowPlaying(client, site)
-    print(f"serving {site} on http://{bind}:{port}/", flush=True)
+    server = ThreadingHTTPServer((listen, port), functools.partial(Handler, directory=site))
+    server.app = Daemon(client, site, work, threads)
+    print(f"plex-cc-fixer API on http://{listen}:{port}/ (pages from {site}, work in {work})", flush=True)
     server.serve_forever()
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--site", required=True, help="folder holding the cheat sheet pages")
+    p.add_argument("--work", required=True, help="folder for episode work files; one subfolder per show")
     p.add_argument("--port", type=int, default=8766)
-    p.add_argument("--bind", default="0.0.0.0")
+    p.add_argument("--listen", default="127.0.0.1", help="address to listen on")
     p.add_argument("--plex-url", default="http://localhost:32400")
     p.add_argument("--plex-token-file", default=None, help="file containing the Plex token (or set PLEX_TOKEN)")
+    p.add_argument("--threads", type=int, default=3, help="CPU threads Whisper may use in a generation job")
     a = p.parse_args(argv)
-    serve(a.site, a.port, a.bind, a.plex_url, a.plex_token_file)
+    serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads)
 
 
 if __name__ == "__main__":
