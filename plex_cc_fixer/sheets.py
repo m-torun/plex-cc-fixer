@@ -27,6 +27,13 @@ a { color: var(--accent); }
 nav { margin: 1rem 0 .5rem; border-top: 1px solid var(--line); }
 nav a { display: flex; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--line); color: var(--fg); text-decoration: none; }
 nav .when { flex: 0 0 4.1rem; }
+nav .row { display: flex; align-items: center; gap: .5rem; border-bottom: 1px solid var(--line); }
+nav .row a { flex: 1; border-bottom: 0; }
+nav .row.on a { font-weight: 700; }
+button.jump { flex: 0 0 auto; font: inherit; font-size: .9rem; font-weight: 600; padding: .45rem .8rem; border-radius: 9px; border: 1px solid var(--accent); background: transparent; color: var(--accent); }
+button.jump:disabled { border-color: var(--line); color: var(--dim); }
+.head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .2rem; }
+.now { position: sticky; top: 0; z-index: 1; margin: .6rem -1rem; padding: .55rem 1rem; background: var(--bg); border-bottom: 1px solid var(--line); font-size: .9rem; color: var(--dim); }
 .seg { scroll-margin-top: .5rem; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: .9rem 1rem; margin: 1rem 0; }
 .when { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; font-size: .95rem; }
 .kind { color: var(--dim); font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }

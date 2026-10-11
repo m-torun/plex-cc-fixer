@@ -7,6 +7,8 @@
   POST /api/jobs          {"key": "<ratingKey>"} start subtitle and cheat sheet generation;
                           with "make": "sheet", the cheat sheet alone
   POST /api/jobs/cancel   {"id": <job id>}
+  POST /api/seek          {"key": "<ratingKey>", "client": "<player's Plex client id>", "position": <seconds>}
+                          move the playback of that recording on that player
   GET  /<path>            the cheat sheet pages, as files from the site folder
 
 An interface (plex-buddy) talks to this. It listens on 127.0.0.1 by default and has no
@@ -41,7 +43,8 @@ STEPS = {
         ("[srt]", "Attaching the subtitle in Plex", None),
         ("[plex]", "Finishing", None),
     ),
-    "sheet": (  # the cheat sheet alone; the recording is still transcribed, to find where each part starts
+    "sheet": (  # the cheat sheet alone, from the subtitle Plex already has; transcribed only when it has none
+        ("[subtitle]", "Researching the episode on the web", 0.1),
         ("[asr]", "Transcribing speech", None),
         ("[align]", "Merging the broadcast captions", None),
         ("[captions]", "Researching the episode on the web", 0.82),
@@ -89,8 +92,9 @@ class Cached:
 class Jobs:
     """Runs the pipeline for one recording at a time and remembers how each run went."""
 
-    def __init__(self, work, site, threads=3, finished=lambda job: None):
+    def __init__(self, work, site, threads=3, finished=lambda job: None, plex_args=()):
         self.work, self.site, self.threads, self.finished = work, site, threads, finished
+        self.plex_args = list(plex_args)
         self.folder = os.path.join(work, "jobs")
         os.makedirs(self.folder, exist_ok=True)
         self.history = os.path.join(self.folder, "history.json")
@@ -159,8 +163,8 @@ class Jobs:
         command = "brief" if job.get("make") == "sheet" else "episode"
         return (["nice", "-n", "10", sys.executable, "-u", "-m", "plex_cc_fixer", command, job["file"],
                  "--work", os.path.join(self.work, show_folder), "--prompt", prompt,
-                 "--threads", str(self.threads), "--site", self.site]
-                + (["--polish"] if command == "episode" else []))
+                 "--threads", str(self.threads), "--site", self.site, "--rating-key", str(job["key"])]
+                + self.plex_args + (["--polish"] if command == "episode" else []))
 
     def worker(self):
         while True:
@@ -225,10 +229,10 @@ class Jobs:
 
 
 class Daemon:
-    def __init__(self, client, site, work, threads):
+    def __init__(self, client, site, work, threads, plex_args=()):
         self.client, self.site = client, site
         self.subtitles = {}  # ratingKey -> (has a subtitle, when asked)
-        self.jobs = Jobs(work, site, threads, self.job_finished)
+        self.jobs = Jobs(work, site, threads, self.job_finished, plex_args)
         self.now = Cached(self.read_now, 2.0)
         self.recent = Cached(self.read_recent, 20.0)
 
@@ -277,6 +281,22 @@ class Daemon:
             })
         return {"recordings": rows, "error": error}
 
+    def seek(self, key, client_id, position):
+        """Move the playback of this recording on this player to `position` seconds."""
+        found = self.read_now()  # asked now, not the copy that may be two seconds old
+        session = next((p for p in found["playing"] if p["key"] == key and p["client"] == client_id), None)
+        if session is None:
+            raise KeyError("that recording is not playing on that player right now")
+        if session["duration"]:
+            position = min(position, session["duration"] - 5)
+        position = max(0.0, position)
+        player = self.client.player(client_id)
+        if player is None:
+            raise plex.PlayerError(session["player"] + " does not take remote-control commands through Plex")
+        player.seek(position)
+        self.now.expire()
+        return {"player": session["player"], "position": position}
+
     def start_job(self, key, make="all"):
         if make not in STEPS:
             raise ValueError('"make" is "all" or "sheet"')
@@ -314,6 +334,8 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/jobs":
                 return self.reply(200, daemon.start_job(body["key"], body.get("make", "all")))
+            if self.path == "/api/seek":
+                return self.reply(200, daemon.seek(str(body["key"]), str(body["client"]), float(body["position"])))
             if self.path == "/api/jobs/cancel":
                 job = daemon.jobs.cancel(int(body["id"]))
                 daemon.recent.expire()
@@ -323,6 +345,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.reply(404, {"error": str(error.args[0]) if error.args else "not found"})
         except (ValueError, TypeError) as error:
             return self.reply(400, {"error": str(error)})
+        except plex.PlayerError as error:
+            return self.reply(502, {"error": str(error)})
 
     def reply(self, status, data):
         body = json.dumps(data).encode()
@@ -342,7 +366,8 @@ class Handler(SimpleHTTPRequestHandler):
 def serve(site, work, port=8766, listen="127.0.0.1", plex_url="http://localhost:32400", token_file=None, threads=3):
     client = plex.PlexClient(plex_url, plex.load_token(token_file))
     server = ThreadingHTTPServer((listen, port), functools.partial(Handler, directory=site))
-    server.app = Daemon(client, site, work, threads)
+    plex_args = ["--plex-url", plex_url] + (["--plex-token-file", token_file] if token_file else [])
+    server.app = Daemon(client, site, work, threads, plex_args)
     print(f"plex-cc-fixer API on http://{listen}:{port}/ (pages from {site}, work in {work})", flush=True)
     server.serve_forever()
 
