@@ -118,6 +118,16 @@ def research(cues, identity, claude, log=print):
     return facts
 
 
+# A sketch's title says what it is about, so these kinds are shown by their type alone.
+PLAIN = {"cold open": "Cold open", "monologue": "Monologue", "sketch": "Sketch", "pretaped": "Filmed piece",
+         "news desk": "News desk", "interview": "Interview"}
+
+
+def shown_name(segment):
+    """What the viewer sees as a segment's name: nothing that gives away what happens in it."""
+    return segment.get("label") or PLAIN.get(segment.get("kind"), segment.get("title") or segment.get("kind", ""))
+
+
 def render_brief(code, facts, changes_page=None):
     e = html.escape
     episode = facts.get("episode", {})
@@ -127,15 +137,14 @@ def render_brief(code, facts, changes_page=None):
             "<p class=\"dim\">Background only, no spoilers. Times are positions in the recording, commercials included.</p>"]
     segments = facts.get("segments", [])
     body.append("<nav>" + "".join(
-        f"<a href=\"#s{n}\"><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> {e(segment.get('title', ''))}</a>"
+        f"<a href=\"#s{n}\"><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> {e(shown_name(segment))}</a>"
         for n, segment in enumerate(segments, 1)) + "</nav>")
     if facts.get("notes"):
         body.append(f"<details><summary>What this sheet is missing</summary><p class=\"dim\">{e(facts['notes'])}</p></details>")
     for n, segment in enumerate(segments, 1):
-        part = [f"<section class=\"seg\" id=\"s{n}\"><div><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> "
-                f"<span class=\"kind\">{e(segment.get('kind', ''))}</span></div><h2>{e(segment.get('title', ''))}</h2>"]
-        if segment.get("premise"):
-            part.append(f"<p>{e(segment['premise'])}</p>")
+        # The premise and the cast list stay in the facts for the subtitle editor; shown here they gave the segment away.
+        part = [f"<section class=\"seg\" id=\"s{n}\"><div><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span></div>"
+                f"<h2>{e(shown_name(segment))}</h2>"]
         if segment.get("know_before"):
             part.append("<dl>" + "".join(f"<dt>{e(item.get('topic', ''))}</dt><dd>{e(item.get('explanation', ''))}</dd>"
                                          for item in segment["know_before"]) + "</dl>")
@@ -143,9 +152,6 @@ def render_brief(code, facts, changes_page=None):
             part.append("<p class=\"dim\">Nothing you need to know first.</p>")
         if segment.get("confidence") == "low":
             part.append("<p class=\"dim\">Not much could be found about this one.</p>")
-        if segment.get("whos_who"):
-            part.append("<details><summary>Who's who</summary><ul>" + "".join(
-                f"<li>{e(p.get('performer', ''))} as {e(p.get('plays', ''))}</li>" for p in segment["whos_who"]) + "</ul></details>")
         links = [s for s in segment.get("sources", []) if s.startswith("http")]
         if links:
             part.append("<details><summary>Sources</summary><ul>" + "".join(

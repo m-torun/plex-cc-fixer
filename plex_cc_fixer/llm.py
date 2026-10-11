@@ -40,7 +40,10 @@ class Claude:
                 return json.load(f)
 
         cmd = [self.cli, "-p", "--output-format", "json", "--model", self.model, "--effort", effort,
-               "--no-session-persistence", "--disable-slash-commands", "--json-schema", json.dumps(schema)]
+               "--no-session-persistence", "--disable-slash-commands", "--json-schema", json.dumps(schema),
+               # Without these the run reads the user's own instruction file and connectors, and has
+               # written remarks about them into a cheat sheet.
+               "--setting-sources", "project", "--strict-mcp-config"]
         if tools:
             cmd += ["--tools", ",".join(tools), "--allowedTools"] + list(tools)
         else:
