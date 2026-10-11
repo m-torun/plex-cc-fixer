@@ -183,9 +183,11 @@ def write_site(site, media_path, code, facts, changes=None):
     name = urllib.parse.quote(os.path.basename(base))
     with open(base + ".json", "w", encoding="utf-8") as f:
         json.dump(dict(facts, code=code, media=os.path.basename(media_path)), f, indent=1)
-    with open(base + ".html", "w", encoding="utf-8") as f:
-        f.write(render_brief(code, facts, name + ".changes.html" if changes else None))
     if changes:
         with open(base + ".changes.html", "w", encoding="utf-8") as f:
             f.write(render_changes(code, changes, name + ".html"))
+    # A run that makes the sheet alone keeps the link to the corrections page an earlier subtitle run wrote.
+    linked = name + ".changes.html" if os.path.exists(base + ".changes.html") else None
+    with open(base + ".html", "w", encoding="utf-8") as f:
+        f.write(render_brief(code, facts, linked))
     return base + ".html"
