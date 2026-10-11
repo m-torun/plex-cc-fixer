@@ -10,6 +10,8 @@ from .sheets import clock, page, relative_page
 
 KINDS = ["cold open", "monologue", "sketch", "pretaped", "news desk", "music", "interview", "goodnights", "other"]
 
+LEAD_IN = 3  # seconds before a segment's start that its Play button jumps to
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -32,11 +34,10 @@ SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string"},
+                    "label": {"type": "string"},
                     "kind": {"type": "string", "enum": KINDS},
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "premise": {"type": "string"},
                     "know_before": {
                         "type": "array",
                         "items": {
@@ -46,6 +47,8 @@ SCHEMA = {
                             "additionalProperties": False,
                         },
                     },
+                    "title": {"type": "string"},
+                    "premise": {"type": "string"},
                     "whos_who": {
                         "type": "array",
                         "items": {
@@ -58,7 +61,8 @@ SCHEMA = {
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "sources": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["title", "kind", "start", "end", "premise", "know_before", "whos_who", "confidence", "sources"],
+                "required": ["label", "kind", "start", "end", "know_before", "title", "premise", "whos_who",
+                             "confidence", "sources"],
                 "additionalProperties": False,
             },
         },
@@ -68,31 +72,86 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-PROMPT = """I recorded a TV episode off the air. I want two things from you: the list of its segments with their times, and for each segment the background a viewer needs in order to get the jokes.
+PROMPT = """I recorded a TV episode off the air. I want two things from you: the list of its segments with their times, and for each segment a short glossary of the background a viewer needs in order to get the jokes.
 
-The viewer is an adult who follows the news loosely. They miss jokes that lean on things they have not seen: a news story or social-media moment from recent weeks, an American advert, an old TV show or film, a celebrity's public image, a politician's verbal habits, a regional stereotype. They will read your notes on their phone just before watching each segment.
+The viewer is an adult who follows the news loosely. They miss jokes that lean on things they have not seen: a news story or social-media moment from recent weeks, an American advert, an old TV show or film, a celebrity's public image, a politician's verbal habits, a regional stereotype. They read your notes on their phone just before each segment, and uses the list to jump the playback to a segment.
 
-So the notes must give them the background and must not give away the segment itself: no jokes, no twists, no surprise guests, no ending. "This parodies Press Your Luck, a long-running game show where contestants shout 'no whammies' while a board flashes prizes" is the right kind of note. "Her character keeps hitting whammies until she has lost everything" is a spoiler. The same goes for titles: if a segment's usual title gives away its turn, give it a plain neutral title instead. In "who's who", an impression of a real person is fine to name; leave out an entry when the identity is itself the surprise.
+They found an earlier version of these notes spoiled the show: it told them what each segment was about before they watched it. So nothing they see may say what happens in a segment, what it is about, or how it uses the things you explain. Two fields are what they see:
+
+- label: the segment's name on their screen. Use the type of segment, and add a name only when that name is a fixture of the show or a performer and gives nothing away: "Cold open", "Monologue", "Sketch", "Filmed piece", the news segment under its own name, "Music: " and the artist, "Goodnights". Never a sketch's title, which usually gives away its idea.
+- know_before: a glossary. Each entry names one real thing the segment assumes they know (a person, a news story, an advert, a programme, a phrase, a stereotype) and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Give only what they would be lost without, usually one to four entries, and none for a segment that needs none; do not pad. Leave out an entry whose mere presence would give away a surprise, such as an unannounced guest.
+
+Three more fields are for the subtitle editor and are never shown to them, so they should say plainly what the segment is: title (its usual title), premise (one line on what it is about) and whos_who (performer and who they play).
 
 The recording: {identity}. The file starts a little before the programme and includes the commercial breaks. Leave out the commercials and anything from other programmes before or after.
 
 Work like this:
 1. Search the web for this episode: the sketch list, recaps and reviews. Use them to name the segments and learn what each is about.
-2. Match them to the transcript below and give each segment's start and end time, in the transcript's own clock.
-3. For each segment, work out what it leans on, and search for anything you are not sure of (the advert being parodied, the news story, the person being impersonated). Explain each in a sentence or two of plain language. A segment that needs no background gets an empty list; do not pad.
+2. Match them to the transcript below and give each segment's start and end time, in the transcript's own clock. They jump to the start time, so put it at the segment's first words, not in the commercial before it.
+3. For each segment, work out what it leans on, and search for anything you are not sure of (the advert being parodied, the news story, the person being impersonated).
 
-This is best effort. Where you cannot find out what a segment refers to, say so and mark it low confidence. An honest gap is more useful than an invented explanation.
+Always look for the programme's sign-off when it has one: the host's thank-yous and goodbyes at the very end, after the last commercial break (kind goodnights). Their player tends to skip it as if it were the credits, and this list is how they find it, so give its start exactly. If the transcript ends before it, say in notes that the recording stops before the goodbyes.
 
-Also collect the names likely to be spoken (cast, host, guests, recurring characters, people impersonated), spelled correctly. They are used to fix the transcript, which was made by speech recognition and often misspells names.
+This is best effort. Where you cannot find out what a segment refers to, leave its glossary empty and mark it low confidence. An honest gap is more useful than an invented explanation.
+
+Also collect the names likely to be spoken (cast, host, guests, recurring characters, people impersonated), spelled correctly. They are used to fix the transcript, which often misspells names.
 
 What to return:
 - episode: the show, season and episode, air date, host, musical guest, the cast appearing, and the names to expect.
-- segments, in running order. For each: title; kind; start and end as H:MM:SS; premise (one spoiler-free line saying what kind of segment it is); know_before (topic and explanation pairs); whos_who (performer and who they play); confidence; sources (the pages you relied on).
-- notes: anything the viewer should know about gaps in this sheet, in a sentence or two. Empty if none.
+- segments, in running order. For each: label; kind; start and end as H:MM:SS; know_before (topic and explanation pairs); title, premise and whos_who for the editor; confidence; sources (the pages you relied on).
+- notes: one or two sentences for the viewer about gaps in this sheet (a segment you could not place, a time you are unsure of, the recording stopping early), giving away nothing. Empty if none. Nothing else belongs there.
 
 The transcript, as time | text:
 
 {transcript}"""
+
+# What the page does while it is open: asks the daemon whether this recording is playing, and sends a jump.
+SCRIPT = """<script>
+(function () {
+  const status = document.getElementById("now");
+  const buttons = Array.from(document.querySelectorAll("button.jump"));
+  const rows = Array.from(document.querySelectorAll("nav .row"));
+  const here = decodeURIComponent(location.pathname);
+  let playing = null, said = "", saidUntil = 0;
+  const clock = s => {
+    s = Math.max(0, Math.floor(s));
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = String(s % 60).padStart(2, "0");
+    return h ? h + ":" + String(m).padStart(2, "0") + ":" + x : m + ":" + x;
+  };
+  function show() {
+    buttons.forEach(button => { button.disabled = !playing; });
+    let current = null;
+    if (playing) rows.forEach(row => { if (Number(row.dataset.at) <= playing.position + 1) current = row; });
+    rows.forEach(row => row.classList.toggle("on", row === current));
+    if (Date.now() < saidUntil) { status.textContent = said; return; }
+    status.textContent = playing
+      ? "Playing on " + playing.player + ", at " + clock(playing.position) + (playing.state === "paused" ? " (paused)" : "") + ". Play jumps to a part."
+      : "Not playing in Plex right now. Start it there, and Play jumps to a part.";
+  }
+  function say(text) { said = text; saidUntil = Date.now() + 6000; status.textContent = text; }
+  async function look() {
+    try {
+      const data = await (await fetch("/api/now", {cache: "no-store"})).json();
+      playing = (data.playing || []).find(p => p.sheet && here.endsWith(decodeURIComponent(p.sheet))) || null;
+    } catch (error) { playing = null; }
+    show();
+  }
+  buttons.forEach(button => button.addEventListener("click", async () => {
+    if (!playing) return;
+    const at = Number(button.dataset.at), player = playing.player;
+    say("Jumping to " + clock(at) + " on " + player + "…");
+    try {
+      const response = await fetch("/api/seek", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({key: playing.key, client: playing.client, position: at})});
+      const answer = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(answer.error || response.statusText);
+      say("Jumped to " + clock(at) + " on " + player + ".");
+    } catch (error) { say("Could not jump: " + error.message); }
+  }));
+  look();
+  setInterval(() => { if (document.visibilityState === "visible") look(); }, 3000);
+})();
+</script>"""
 
 
 def seconds(clock):
@@ -134,17 +193,25 @@ def render_brief(code, facts, changes_page=None):
     heading = " · ".join(x for x in (episode.get("show"), code) if x)
     people = " / ".join(x for x in (episode.get("host"), episode.get("musical_guest")) if x)
     body = [f"<h1>{e(heading)}</h1>", f"<p class=\"dim\">{e(people)}{' · aired ' + e(episode['air_date']) if episode.get('air_date') else ''}</p>",
-            "<p class=\"dim\">Background only, no spoilers. Times are positions in the recording, commercials included.</p>"]
+            "<p class=\"dim\">Background only, no spoilers. Times are positions in the recording, commercials included.</p>",
+            "<p id=\"now\" class=\"now\">Checking whether this is playing…</p>"]
     segments = facts.get("segments", [])
+
+    def jump(segment, text):
+        at = max(0, segment.get("start_seconds", 0) - LEAD_IN)
+        return f"<button class=\"jump\" data-at=\"{at:.0f}\" disabled>{text}</button>"
+
     body.append("<nav>" + "".join(
-        f"<a href=\"#s{n}\"><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> {e(shown_name(segment))}</a>"
+        f"<div class=\"row\" data-at=\"{segment.get('start_seconds', 0):.0f}\"><a href=\"#s{n}\">"
+        f"<span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> {e(shown_name(segment))}</a>"
+        f"{jump(segment, 'Play')}</div>"
         for n, segment in enumerate(segments, 1)) + "</nav>")
     if facts.get("notes"):
         body.append(f"<details><summary>What this sheet is missing</summary><p class=\"dim\">{e(facts['notes'])}</p></details>")
     for n, segment in enumerate(segments, 1):
         # The premise and the cast list stay in the facts for the subtitle editor; shown here they gave the segment away.
-        part = [f"<section class=\"seg\" id=\"s{n}\"><div><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span></div>"
-                f"<h2>{e(shown_name(segment))}</h2>"]
+        part = [f"<section class=\"seg\" id=\"s{n}\"><div class=\"head\"><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span>"
+                f"{jump(segment, 'Play from here')}</div><h2>{e(shown_name(segment))}</h2>"]
         if segment.get("know_before"):
             part.append("<dl>" + "".join(f"<dt>{e(item.get('topic', ''))}</dt><dd>{e(item.get('explanation', ''))}</dd>"
                                          for item in segment["know_before"]) + "</dl>")
@@ -162,7 +229,7 @@ def render_brief(code, facts, changes_page=None):
     if changes_page:
         footer += f" <a href=\"{e(changes_page, quote=True)}\">Subtitle corrections</a>."
     body.append(footer + "</p>")
-    return page(f"{heading}: before you watch", "".join(body))
+    return page(f"{heading}: before you watch", "".join(body), SCRIPT)
 
 
 def render_changes(code, changes, sheet_page):

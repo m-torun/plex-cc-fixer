@@ -1,4 +1,6 @@
+import itertools
 import os
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -92,23 +94,50 @@ class PlexClient:
             cache[rating_key] = part.get("file") if part is not None else None
         return cache[rating_key]
 
-    def find_rating_key(self, media_path, title):
+    def find_rating_key(self, media_path, title=None):
+        """The library item whose media file is media_path: by searching for its title, then by going through the libraries."""
+        title = title or os.path.splitext(os.path.basename(media_path))[0].split(" - ")[-1]
         terms = [title] + [p.strip() for p in title.split(";")]
         for term in terms:
             for video in self._get_xml("/search", {"query": term}).iter("Video"):
                 for part in video.iter("Part"):
                     if part.get("file") == media_path:
                         return video.get("ratingKey")
+        # An episode named like its show ("CBS News Sunday Morning") is not among the search results.
+        for section in self._get_xml("/library/sections", timeout=10):
+            listing = self._get_xml(f"/library/sections/{section.get('key')}/all",
+                                    {"type": 4} if section.get("type") == "show" else {}, timeout=60)
+            for video in listing.iter("Video"):
+                if any(part.get("file") == media_path for part in video.iter("Part")):
+                    return video.get("ratingKey")
+        return None
+
+    def uploaded_subtitles(self, rating_key):
+        """The subtitles attached to an item that are not part of the recording; the selected one first, then the newest."""
+        root = self._get_xml(f"/library/metadata/{rating_key}", timeout=10)
+        found = [{"id": int(s.get("id") or 0), "key": s.get("key"), "title": s.get("title") or "",
+                  "selected": s.get("selected") == "1"}
+                 for s in root.iter("Stream") if s.get("streamType") == "3" and s.get("key")]
+        return sorted(found, key=lambda s: (not s["selected"], -s["id"]))
+
+    def fetch(self, path, timeout=60):
+        with urllib.request.urlopen(self._url(path), timeout=timeout) as r:
+            return r.read()
+
+    def player(self, client_id):
+        """The player with this Plex client id, when Plex lists it as one that takes commands."""
+        for entry in self._get_xml("/clients", timeout=5):
+            if entry.get("machineIdentifier") == client_id and entry.get("host") and entry.get("port"):
+                return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "")
         return None
 
     def subtitle_titles(self, rating_key):
         root = self._get_xml(f"/library/metadata/{rating_key}")
         return {s.get("title") for s in root.iter("Stream") if s.get("streamType") == "3"}
 
-    def attach_srt(self, media_path, srt_path, stream_title, log=print):
+    def attach_srt(self, media_path, srt_path, stream_title, log=print, key=None):
         """Attach an SRT to the Plex item whose media file is media_path. Skips if already attached."""
-        episode_title = os.path.splitext(os.path.basename(media_path))[0].split(" - ")[-1]
-        key = self.find_rating_key(media_path, episode_title)
+        key = key or self.find_rating_key(media_path)
         if not key:
             raise SystemExit(f"no Plex item found whose media file is {media_path}")
         plex_title = stream_title[:-len(".srt")] if stream_title.endswith(".srt") else stream_title
@@ -124,3 +153,48 @@ class PlexClient:
         if plex_title not in self.subtitle_titles(key):
             raise SystemExit("upload accepted but the subtitle is not visible in Plex metadata")
         return key
+
+
+class PlayerError(RuntimeError):
+    pass
+
+
+class Player:
+    """A Plex player, driven with the requests Plex's own apps use on one another."""
+    SENDER = "plex-cc-fixer"
+    ids = itertools.count(int(time.time()) % 1000000)
+
+    def __init__(self, host, port, client_id, name=""):
+        self.address, self.client_id, self.name = f"http://{host}:{port}", client_id, name or "the player"
+
+    def send(self, path, params, timeout=6):
+        query = urllib.parse.urlencode(dict(params, commandID=next(Player.ids)))
+        request = urllib.request.Request(f"{self.address}{path}?{query}", headers={
+            "X-Plex-Client-Identifier": self.SENDER, "X-Plex-Device-Name": self.SENDER,
+            "X-Plex-Target-Client-Identifier": self.client_id})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except OSError as error:
+            raise PlayerError(f"{self.name} did not answer ({error})")
+
+    def video(self):
+        """State, and position in seconds, of the video the player has open. Asked twice: the first answer can be stale."""
+        found = ("", None)
+        for attempt in range(2):
+            for element in ET.fromstring(self.send("/player/timeline/poll", {"wait": 0})).iter("Timeline"):
+                if element.get("type") == "video":
+                    position = element.get("time", "")
+                    found = (element.get("state", ""), int(position) / 1000.0 if position.isdigit() else None)
+            if found[0] != "stopped":
+                break
+            time.sleep(0.5)
+        return found
+
+    def seek(self, seconds):
+        """Move playback to `seconds`. The command goes only to a player that is playing or paused and
+        reports a position: a seek sent to one with nothing open has crashed a player's app."""
+        state, position = self.video()
+        if state not in ("playing", "paused") or position is None:
+            raise PlayerError(f"{self.name} is not playing anything it can jump in")
+        self.send("/player/playback/seekTo", {"type": "video", "offset": int(round(seconds * 1000))})

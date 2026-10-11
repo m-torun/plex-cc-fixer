@@ -53,6 +53,24 @@ def load_cc(path):
     return cues
 
 
+def parse_srt(text):
+    """The cues of an ordinary subtitle file, as dicts with start, end and text."""
+    cues = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = block.splitlines()
+        arrow = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if arrow is None:
+            continue
+        try:
+            start, end = (parse_ts(part.strip().split(" ")[0]) for part in lines[arrow].split("-->"))
+        except ValueError:
+            continue
+        words = clean_cc(" ".join(lines[arrow + 1:]))
+        if words:
+            cues.append({"start": start, "end": end, "text": words})
+    return cues
+
+
 def dedupe_rolling(cues):
     """Rolling captions repeat the previous line(s) in each new cue; keep each line once."""
     lines, prev = [], []
