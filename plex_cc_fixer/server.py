@@ -4,7 +4,8 @@
 
   GET  /api/now           what Plex is playing, and each item's cheat sheet if it has one
   GET  /api/recordings    the newest recordings, with show, subtitles yes/no, cheat sheet, generation job
-  POST /api/jobs          {"key": "<ratingKey>"} start subtitle and cheat sheet generation
+  POST /api/jobs          {"key": "<ratingKey>"} start subtitle and cheat sheet generation;
+                          with "make": "sheet", the cheat sheet alone
   POST /api/jobs/cancel   {"id": <job id>}
   GET  /<path>            the cheat sheet pages, as files from the site folder
 
@@ -28,15 +29,27 @@ from . import plex, sheets
 KEPT_JOBS = 30
 LISTED = 120          # recordings in /api/recordings, newest first
 SUBTITLE_CHECK = 300  # seconds a recording's "has a subtitle" answer is reused
-STEPS = (  # the pipeline's log lines, in order, and what is happening once each has been seen
-    ("[asr]", "Transcribing speech"),
-    ("[align]", "Merging the broadcast captions"),
-    ("[captions]", "Researching the episode on the web"),
-    ("[research]", "Correcting words and timing punchlines"),
-    ("[polish]", "Writing the cheat sheet"),
-    ("[srt]", "Attaching the subtitle in Plex"),
-    ("[plex]", "Finishing"),
-)
+# What a job makes. For each: the pipeline's log lines, in order, with what is happening once
+# each has been seen and how far along the run then is (None: transcription reports its own).
+STEPS = {
+    "all": (  # the subtitle, attached in Plex, and the cheat sheet
+        ("[asr]", "Transcribing speech", None),
+        ("[align]", "Merging the broadcast captions", None),
+        ("[captions]", "Researching the episode on the web", 0.62),
+        ("[research]", "Correcting words and timing punchlines", 0.85),
+        ("[polish]", "Writing the cheat sheet", 0.97),
+        ("[srt]", "Attaching the subtitle in Plex", None),
+        ("[plex]", "Finishing", None),
+    ),
+    "sheet": (  # the cheat sheet alone; the recording is still transcribed, to find where each part starts
+        ("[asr]", "Transcribing speech", None),
+        ("[align]", "Merging the broadcast captions", None),
+        ("[captions]", "Researching the episode on the web", 0.82),
+        ("[research]", "Writing the cheat sheet", 0.97),
+        ("[site]", "Finishing", None),
+    ),
+}
+TRANSCRIBED = {"all": 0.6, "sheet": 0.8}  # how far along a run is when transcription ends
 
 
 def episode_name(item):
@@ -100,13 +113,13 @@ class Jobs:
             json.dump(self.jobs, f, indent=1)
         os.replace(self.history + ".tmp", self.history)
 
-    def start(self, recording):
+    def start(self, recording, make="all"):
         with self.lock:
             for job in self.jobs:
                 if job["file"] == recording["file"] and job["state"] in ("queued", "running"):
                     return job
             job = {
-                "id": int(time.time() * 1000), "key": recording["key"], "file": recording["file"],
+                "id": int(time.time() * 1000), "key": recording["key"], "file": recording["file"], "make": make,
                 "label": describe(recording), "show": recording.get("show") or "",
                 "title": recording.get("title") or "", "duration": recording["duration_ms"] / 1000.0,
                 "state": "queued", "step": "Waiting for another job to finish", "progress": None,
@@ -143,9 +156,11 @@ class Jobs:
     def command(self, job):
         show_folder = os.path.basename(os.path.dirname(os.path.dirname(job["file"]))) or "recordings"
         prompt = ", ".join(x.strip() for x in [job["show"]] + job["title"].split(";") if x.strip())
-        return ["nice", "-n", "10", sys.executable, "-u", "-m", "plex_cc_fixer", "episode", job["file"],
-                "--work", os.path.join(self.work, show_folder), "--prompt", prompt,
-                "--threads", str(self.threads), "--polish", "--site", self.site]
+        command = "brief" if job.get("make") == "sheet" else "episode"
+        return (["nice", "-n", "10", sys.executable, "-u", "-m", "plex_cc_fixer", command, job["file"],
+                 "--work", os.path.join(self.work, show_folder), "--prompt", prompt,
+                 "--threads", str(self.threads), "--site", self.site]
+                + (["--polish"] if command == "episode" else []))
 
     def worker(self):
         while True:
@@ -195,20 +210,18 @@ class Jobs:
         with self.lock:
             if job["state"] != "running":
                 return
-            for marker, step in STEPS:
+            make = job.get("make", "all")
+            for marker, step, progress in STEPS[make]:
                 if line.startswith(marker):
                     job["step"] = step
+                    if progress is not None:
+                        job["progress"] = progress
             if line.startswith("[asr]") and line.rstrip().endswith("s") and job["duration"]:
-                try:  # "[asr]   1234.5s": transcription is nearly all of the first half of the run
-                    job["progress"] = min(0.6, 0.6 * float(line[5:].strip()[:-1]) / job["duration"])
+                try:  # "[asr]   1234.5s": how far into the recording transcription has come
+                    share = TRANSCRIBED[make]
+                    job["progress"] = min(share, share * float(line[5:].strip()[:-1]) / job["duration"])
                 except ValueError:
                     pass
-            elif line.startswith("[captions]"):
-                job["progress"] = 0.62
-            elif line.startswith("[research]"):
-                job["progress"] = 0.85
-            elif line.startswith("[polish]"):
-                job["progress"] = 0.97
 
 
 class Daemon:
@@ -264,11 +277,13 @@ class Daemon:
             })
         return {"recordings": rows, "error": error}
 
-    def start_job(self, key):
+    def start_job(self, key, make="all"):
+        if make not in STEPS:
+            raise ValueError('"make" is "all" or "sheet"')
         found, error = self.recent.get()
         for recording in found:
             if recording["key"] == str(key):
-                job = self.jobs.start(recording)
+                job = self.jobs.start(recording, make)
                 self.recent.expire()
                 return job
         raise KeyError(error or "that recording is not among the newest ones")
@@ -298,7 +313,7 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError("request too large")
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/jobs":
-                return self.reply(200, daemon.start_job(body["key"]))
+                return self.reply(200, daemon.start_job(body["key"], body.get("make", "all")))
             if self.path == "/api/jobs/cancel":
                 job = daemon.jobs.cancel(int(body["id"]))
                 daemon.recent.expire()
