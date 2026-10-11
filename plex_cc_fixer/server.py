@@ -3,7 +3,7 @@
   python3 -m plex_cc_fixer.server --site DIR --work DIR [--port 8766]
 
   GET  /api/now           what Plex is playing, and each item's cheat sheet if it has one
-  GET  /api/recordings    the newest recordings: subtitles yes/no, cheat sheet, generation job
+  GET  /api/recordings    the newest recordings, with show, subtitles yes/no, cheat sheet, generation job
   POST /api/jobs          {"key": "<ratingKey>"} start subtitle and cheat sheet generation
   POST /api/jobs/cancel   {"id": <job id>}
   GET  /<path>            the cheat sheet pages, as files from the site folder
@@ -26,6 +26,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from . import plex, sheets
 
 KEPT_JOBS = 30
+LISTED = 120          # recordings in /api/recordings, newest first
+SUBTITLE_CHECK = 300  # seconds a recording's "has a subtitle" answer is reused
 STEPS = (  # the pipeline's log lines, in order, and what is happening once each has been seen
     ("[asr]", "Transcribing speech"),
     ("[align]", "Merging the broadcast captions"),
@@ -37,14 +39,19 @@ STEPS = (  # the pipeline's log lines, in order, and what is happening once each
 )
 
 
+def episode_name(item):
+    """An episode's own name, without its show: "S52E03 · Shane Gillis; Rosalía"."""
+    number = ""
+    if item.get("season") and item.get("episode"):
+        number = "S%02dE%02d" % (int(item["season"]), int(item["episode"]))
+    title = item.get("title") if item.get("title") != item.get("show") else ""  # news shows repeat the show's name
+    return " · ".join(x for x in (number, title) if x)
+
+
 def describe(item):
     """A one-line name for a session or a recording."""
     if item.get("show"):
-        number = ""
-        if item.get("season") and item.get("episode"):
-            number = "S%02dE%02d" % (int(item["season"]), int(item["episode"]))
-        title = item.get("title") if item.get("title") != item["show"] else ""  # news shows repeat the show's name
-        return " · ".join(x for x in (item["show"], number, title) if x)
+        return " · ".join(x for x in (item["show"], episode_name(item)) if x)
     return " ".join(x for x in (item.get("title"), "(%s)" % item["year"] if item.get("year") else "") if x)
 
 
@@ -69,8 +76,8 @@ class Cached:
 class Jobs:
     """Runs the pipeline for one recording at a time and remembers how each run went."""
 
-    def __init__(self, work, site, threads=3):
-        self.work, self.site, self.threads = work, site, threads
+    def __init__(self, work, site, threads=3, finished=lambda job: None):
+        self.work, self.site, self.threads, self.finished = work, site, threads, finished
         self.folder = os.path.join(work, "jobs")
         os.makedirs(self.folder, exist_ok=True)
         self.history = os.path.join(self.folder, "history.json")
@@ -181,6 +188,7 @@ class Jobs:
                     job.update(state="failed", step="", progress=None, error=last[-300:] or "exit code %d" % code)
                 job["finished"] = time.time()
             self.save()
+        self.finished(job)
 
     def follow(self, job, line):
         """Move the job's step and progress along from one line of the pipeline's log."""
@@ -206,9 +214,14 @@ class Jobs:
 class Daemon:
     def __init__(self, client, site, work, threads):
         self.client, self.site = client, site
-        self.jobs = Jobs(work, site, threads)
+        self.subtitles = {}  # ratingKey -> (has a subtitle, when asked)
+        self.jobs = Jobs(work, site, threads, self.job_finished)
         self.now = Cached(self.read_now, 2.0)
         self.recent = Cached(self.read_recent, 20.0)
+
+    def job_finished(self, job):
+        self.subtitles.pop(job["key"], None)
+        self.recent.expire()
 
     def read_now(self):
         try:
@@ -228,9 +241,12 @@ class Daemon:
 
     def read_recent(self):
         try:
-            found = self.client.recent(15)
+            found = self.client.recent(LISTED)
             for recording in found:
-                recording["subtitles"] = self.client.has_subtitle(recording["key"])
+                known = self.subtitles.get(recording["key"])
+                if known is None or time.time() - known[1] > SUBTITLE_CHECK:
+                    known = self.subtitles[recording["key"]] = (self.client.has_subtitle(recording["key"]), time.time())
+                recording["subtitles"] = known[0]
             return found, None
         except Exception as error:
             return [], str(error)[:200]
@@ -240,7 +256,8 @@ class Daemon:
         rows = []
         for recording in found:
             rows.append({
-                "key": recording["key"], "label": describe(recording), "added": recording["added"],
+                "key": recording["key"], "label": describe(recording), "show": recording.get("show") or "",
+                "episode": episode_name(recording) or recording.get("title") or "", "added": recording["added"],
                 "duration": recording["duration_ms"] / 1000.0, "subtitles": recording["subtitles"],
                 "sheet": sheets.sheet_for(self.site, recording["file"]),
                 "job": self.jobs.latest_for(recording["file"]),
