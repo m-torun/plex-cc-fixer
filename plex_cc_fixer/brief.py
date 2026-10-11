@@ -34,7 +34,6 @@ SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "label": {"type": "string"},
                     "kind": {"type": "string", "enum": KINDS},
                     "start": {"type": "string"},
                     "end": {"type": "string"},
@@ -61,7 +60,7 @@ SCHEMA = {
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "sources": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["label", "kind", "start", "end", "know_before", "title", "premise", "whos_who",
+                "required": ["kind", "start", "end", "know_before", "title", "premise", "whos_who",
                              "confidence", "sources"],
                 "additionalProperties": False,
             },
@@ -76,12 +75,12 @@ PROMPT = """I recorded a TV episode off the air. I want two things from you: the
 
 The viewer is an adult who follows the news loosely and did not grow up in the United States. He misses jokes that lean on things he has not seen: a news story or social-media moment from recent weeks, an American advert, an old TV show or film, a celebrity's public image, a politician's verbal habits, a regional stereotype. He reads your notes on his phone just before each segment, and uses the list to jump the playback to a segment.
 
-He found an earlier version of these notes spoiled the show: it told him what each segment was about before he watched it. So nothing he sees may say what happens in a segment, what it is about, or how it uses the things you explain. Two fields are what he sees:
+He found an earlier version of these notes spoiled the show: it summarised each segment before he watched it, and its explanations described what happens in the bit. A segment's title is fine with him, and he needs it to keep track of where he is and to find a segment. Beyond the title, nothing he sees may say what happens in a segment or how it uses the things you explain. Two fields are what he sees:
 
-- label: the segment's name on his screen. Use the type of segment, and add a name only when that name is a fixture of the show or a performer and gives nothing away: "Cold open", "Monologue", "Sketch", "Filmed piece", the news segment under its own name, "Music: " and the artist, "Goodnights". Never a sketch's title, which usually gives away its idea.
+- title: the segment's name on his screen. Use the title the segment is usually listed under (the show's own, or the one recaps use), so that he recognises the segment when it starts and can find it again. Where the title alone does not say what kind of segment it is, say so in it: "Cold open: " and its title, "Monologue", the artist and song for music, the news segment under its own name, "Goodnights". Keep it a title, with no description added. Where the usual title itself gives away a punchline or a surprise, such as an unannounced guest's name or the twist, use a plainer name he can still recognise the segment by, such as its setting.
 - know_before: a glossary. Each entry names one real thing the segment assumes he knows (a person, a news story, an advert, a programme, a phrase, a stereotype) and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Give only what he would be lost without, usually one to four entries, and none for a segment that needs none; do not pad. Leave out an entry whose mere presence would give away a surprise, such as an unannounced guest.
 
-Three more fields are for the subtitle editor and are never shown to him, so they should say plainly what the segment is: title (its usual title), premise (one line on what it is about) and whos_who (performer and who they play).
+Two more fields are for the subtitle editor and are never shown to him, so they should say plainly what the segment is: premise (one line on what it is about) and whos_who (performer and who they play).
 
 The recording: {identity}. The file starts a little before the programme and includes the commercial breaks. Leave out the commercials and anything from other programmes before or after.
 
@@ -98,7 +97,7 @@ Also collect the names likely to be spoken (cast, host, guests, recurring charac
 
 What to return:
 - episode: the show, season and episode, air date, host, musical guest, the cast appearing, and the names to expect.
-- segments, in running order. For each: label; kind; start and end as H:MM:SS; know_before (topic and explanation pairs); title, premise and whos_who for the editor; confidence; sources (the pages you relied on).
+- segments, in running order. For each: title; kind; start and end as H:MM:SS; know_before (topic and explanation pairs); premise and whos_who for the editor; confidence; sources (the pages you relied on).
 - notes: one or two sentences for the viewer about gaps in this sheet (a segment you could not place, a time you are unsure of, the recording stopping early), giving away nothing. Empty if none. Nothing else belongs there.
 
 The transcript, as time | text:
@@ -177,14 +176,9 @@ def research(cues, identity, claude, log=print):
     return facts
 
 
-# A sketch's title says what it is about, so these kinds are shown by their type alone.
-PLAIN = {"cold open": "Cold open", "monologue": "Monologue", "sketch": "Sketch", "pretaped": "Filmed piece",
-         "news desk": "News desk", "interview": "Interview"}
-
-
 def shown_name(segment):
-    """What the viewer sees as a segment's name: nothing that gives away what happens in it."""
-    return segment.get("label") or PLAIN.get(segment.get("kind"), segment.get("title") or segment.get("kind", ""))
+    """What the viewer sees as a segment's name: its title, which is how he finds his place."""
+    return segment.get("title") or segment.get("kind", "")
 
 
 def render_brief(code, facts, changes_page=None):
