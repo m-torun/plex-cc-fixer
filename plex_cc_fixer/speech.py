@@ -44,8 +44,9 @@ def transcribe_cached(audio, words_json, log=print, **kwargs):
         log(f"[asr] loaded {len(words)} cached words from {words_json}")
         return words
     words = asr_words(audio, log=log, **kwargs)
-    with open(words_json, "w", encoding="utf-8") as f:
+    with open(words_json + ".part", "w", encoding="utf-8") as f:
         json.dump(words, f)
+    os.replace(words_json + ".part", words_json)
     log(f"[asr] {len(words)} words")
     return words
 
