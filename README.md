@@ -75,7 +75,7 @@ A long-running service with an HTTP API and no page of its own. An interface tal
 | Request | Does |
 | --- | --- |
 | `GET /api/now` | What Plex is playing: title, player, state, position, and the URL of the item's cheat sheet if it has one. |
-| `GET /api/recordings` | The 15 newest recordings: whether each has a subtitle and a cheat sheet, and its latest generation job. |
+| `GET /api/recordings` | The newest recordings (up to 120), each with its show, whether it has a subtitle and a cheat sheet, and its latest generation job. |
 | `POST /api/jobs` | `{"key": "<Plex ratingKey>"}` starts `episode --polish --site` for that recording. One job runs at a time; more wait their turn. |
 | `POST /api/jobs/cancel` | `{"id": <job id>}` |
 | `GET /<path>.html` | The cheat sheet pages, as files from the site folder. |
