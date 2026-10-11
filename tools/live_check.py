@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Check the cheat sheet server against a real player, without anyone holding the remote.
+"""Check the daemon's view of what is playing against a real player, without anyone holding the remote.
 
 Plays a library item on a player through Plex's remote-control protocol (the one
-Plex's own apps use on each other), asks the cheat sheet server what is playing
+Plex's own apps use on each other), asks the daemon what is playing
 while it runs, then stops playback and puts the item's watch state back.
 
 The player's screen shows the item, with sound, for the seconds given. Run it on
@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--plex-address", required=True, help="address:port the player should use to reach Plex")
     parser.add_argument("--plex-url", default="http://127.0.0.1:32400")
     parser.add_argument("--token-file", default=os.path.expanduser("~/.config/plex-token"))
-    parser.add_argument("--server-url", default="http://127.0.0.1:8766", help="the cheat sheet server")
+    parser.add_argument("--server-url", default="http://127.0.0.1:8766", help="the plex-cc-fixer daemon")
     parser.add_argument("--offset", type=int, default=0, help="position to start at, in seconds")
     parser.add_argument("--seconds", type=float, default=15, help="how long to leave it playing")
     parser.add_argument("--expect", choices=("sheet", "no-sheet"), help="fail unless the server offers / does not offer a sheet")

@@ -12,8 +12,8 @@ import os
 import urllib.parse
 
 STYLE = """
-:root { color-scheme: light dark; --bg: #fbfaf7; --fg: #1d1c1a; --dim: #6b6862; --line: #e2dfd8; --card: #ffffff; --accent: #9a3412; --on-accent: #ffffff; }
-@media (prefers-color-scheme: dark) { :root { --bg: #141312; --fg: #ece9e3; --dim: #a09c94; --line: #2e2c29; --card: #1d1c1a; --accent: #fdba74; --on-accent: #1d1c1a; } }
+:root { color-scheme: light dark; --bg: #f4f5f7; --fg: #16181d; --dim: #646b78; --line: #dfe2e8; --card: #ffffff; --accent: #c2410c; --on-accent: #ffffff; }
+@media (prefers-color-scheme: dark) { :root { --bg: #14161a; --fg: #eef0f4; --dim: #9aa1ae; --line: #30343c; --card: #1e2127; --accent: #fb923c; --on-accent: #1a1206; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.5 -apple-system, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
 main { max-width: 42rem; margin: 0 auto; padding: 1.25rem 1rem 4rem; }
@@ -22,6 +22,7 @@ h2 { font-size: 1.15rem; line-height: 1.3; margin: 0; }
 h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 1.6rem 0 .2rem; font-weight: 600; }
 p { margin: .5rem 0; }
 a { color: var(--accent); }
+.back { display: inline-block; margin-bottom: .8rem; text-decoration: none; font-size: .95rem; }
 .dim { color: var(--dim); font-size: .9rem; }
 nav { margin: 1rem 0 .5rem; border-top: 1px solid var(--line); }
 nav a { display: flex; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--line); color: var(--fg); text-decoration: none; }
@@ -47,7 +48,7 @@ def page(title, body, script=""):
     return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             f"<title>{html.escape(title)}</title><style>{STYLE}</style></head>"
-            f"<body><main>{body}</main>{script}</body></html>\n")
+            f"<body><main><a class=\"back\" href=\"/\">‹ Plex buddy</a>{body}</main>{script}</body></html>\n")
 
 
 def clock(value):

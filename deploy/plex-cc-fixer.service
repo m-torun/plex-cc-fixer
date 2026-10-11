@@ -1,0 +1,14 @@
+[Unit]
+Description=plex-cc-fixer daemon: subtitle and cheat sheet generation, cheat sheet pages, API on 127.0.0.1:8766
+After=network.target plexmediaserver.service
+
+[Service]
+User=mustafa
+WorkingDirectory=/home/mustafa/code/plex-cc-fixer
+ExecStart=/usr/bin/python3 -m plex_cc_fixer.server --site /home/mustafa/plex-cc-fixer/site --work /home/mustafa/plex-cc-fixer/episodes --port 8766
+Restart=on-failure
+# A generation job runs for half an hour; give it a moment to stop when the service does.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

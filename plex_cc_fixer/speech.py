@@ -23,9 +23,9 @@ MIN_PIECE_SECONDS = 0.7
 
 
 def asr_words(audio, model, device="cpu", compute="int8", language="en", prompt=None,
-              beam_size=1, log=print, **transcribe_kwargs):
+              beam_size=1, threads=0, log=print, **transcribe_kwargs):
     from faster_whisper import WhisperModel
-    whisper = WhisperModel(model, device=device, compute_type=compute)
+    whisper = WhisperModel(model, device=device, compute_type=compute, cpu_threads=threads)
     segments, _ = whisper.transcribe(audio, language=language, word_timestamps=True, vad_filter=True,
                                      beam_size=beam_size, initial_prompt=prompt, **transcribe_kwargs)
     words = []

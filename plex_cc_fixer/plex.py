@@ -38,6 +38,8 @@ class PlexClient:
             if not path and item.get("ratingKey"):
                 path = self._media_file(item.get("ratingKey"))
             playing.append({
+                "key": item.get("ratingKey"),
+                "client": player.get("machineIdentifier"),
                 "type": item.get("type"),
                 "title": item.get("title"),
                 "show": item.get("grandparentTitle"),
@@ -52,6 +54,35 @@ class PlexClient:
                 "state": player.get("state"),
             })
         return playing
+
+    def recent(self, limit=15):
+        """The newest recordings across the libraries of shows: one dict per episode, newest first."""
+        found = []
+        for section in self._get_xml("/library/sections", timeout=5):
+            if section.get("type") != "show":
+                continue
+            listing = self._get_xml(f"/library/sections/{section.get('key')}/all", {
+                "type": 4, "sort": "addedAt:desc", "X-Plex-Container-Start": 0, "X-Plex-Container-Size": limit}, timeout=10)
+            for item in listing.iter("Video"):
+                part = item.find("Media/Part")
+                if part is None or not part.get("file"):
+                    continue
+                found.append({
+                    "key": item.get("ratingKey"),
+                    "title": item.get("title"),
+                    "show": item.get("grandparentTitle"),
+                    "season": item.get("parentIndex"),
+                    "episode": item.get("index"),
+                    "file": part.get("file"),
+                    "added": int(item.get("addedAt") or 0),
+                    "duration_ms": int(item.get("duration") or 0),
+                })
+        return sorted(found, key=lambda r: -r["added"])[:limit]
+
+    def has_subtitle(self, rating_key):
+        """True when the item has a subtitle that is not part of the recording (an upload or a sidecar file)."""
+        root = self._get_xml(f"/library/metadata/{rating_key}", timeout=5)
+        return any(s.get("streamType") == "3" and s.get("key") for s in root.iter("Stream"))
 
     def _media_file(self, rating_key):
         """The media file of a library item; remembered, since a session is asked about every few seconds."""

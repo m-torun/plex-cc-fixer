@@ -46,7 +46,8 @@ def prepare(a):
         media.extract_captions(ep)
 
     words = speech.transcribe_cached(audio, words_json, model=a.model, device=a.device, compute=a.compute,
-                                     language=a.language, prompt=a.prompt, beam_size=a.beam_size)
+                                     language=a.language, prompt=a.prompt, beam_size=a.beam_size,
+                                     threads=a.threads)
     cc_lines = captions.dedupe_rolling(captions.load_cc(cc_srt))
     cues, fallback, reference = speech.build_subtitles(words, cc_lines, max_chars=a.max_chars)
     return ts, code, ep, cues, fallback, reference
@@ -106,7 +107,7 @@ def cmd_brief(a):
 
 def cmd_serve(a):
     from . import server
-    server.serve(a.site, a.port, a.bind, a.plex_url, a.plex_token_file)
+    server.serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads)
 
 
 def cmd_variants(a):
@@ -126,6 +127,8 @@ def add_recording_arguments(p):
     p.add_argument("--device", default="cpu")
     p.add_argument("--compute", default="int8")
     p.add_argument("--beam-size", type=int, default=1)
+    p.add_argument("--threads", type=int, default=0,
+                   help="CPU threads for Whisper (default: all cores); fewer keeps the machine responsive")
     p.add_argument("--max-chars", type=int, default=speech.DEFAULT_MAX_CHARS,
                    help="longest cue, in characters (default 42: one short line; 84 gives two-line cues)")
     p.add_argument("--llm-model", default=llm.DEFAULT_MODEL, help="Claude model for the editing and research passes")
@@ -154,12 +157,14 @@ def main(argv=None):
     br.add_argument("--site", required=True, help="folder to write the pages into; serve it with any static web server")
     br.set_defaults(func=cmd_brief)
 
-    sv = sub.add_parser("serve", help="web server for the cheat sheets, showing what Plex is playing now")
+    sv = sub.add_parser("serve", help="the daemon: an API for interfaces, the cheat sheet pages, generation jobs")
     sv.add_argument("--site", required=True, help="folder holding the cheat sheet pages")
+    sv.add_argument("--work", required=True, help="folder for episode work files; one subfolder per show")
     sv.add_argument("--port", type=int, default=8766)
-    sv.add_argument("--bind", default="0.0.0.0")
+    sv.add_argument("--listen", default="127.0.0.1")
     sv.add_argument("--plex-url", default=os.environ.get("PLEX_URL", "http://localhost:32400"))
     sv.add_argument("--plex-token-file", default=None, help="file containing the Plex token (or set PLEX_TOKEN)")
+    sv.add_argument("--threads", type=int, default=3, help="CPU threads Whisper may use in a generation job")
     sv.set_defaults(func=cmd_serve)
 
     vt = sub.add_parser("variants", help="transcribe one clip with several Whisper configurations")
