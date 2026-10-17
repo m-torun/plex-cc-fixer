@@ -8,8 +8,12 @@
                           with "make": "sheet", the cheat sheet alone
   POST /api/jobs/cancel   {"id": <job id>}
   POST /api/seek          {"key": "<ratingKey>", "client": "<player's Plex client id>", "position": <seconds>}
-                          move the playback of that recording on that player
+                          move the playback of that recording on that player, and play on if it was paused
+  POST /api/playback      {"key": "<ratingKey>", "client": "<player's Plex client id>", "action": "pause" | "play"}
   GET  /<path>            the cheat sheet pages, as files from the site folder
+
+With --auto SHOW, each new recording of that show gets the full job by itself once Plex has finished
+with it (recordings added before the option was first used are left alone).
 
 An interface (plex-buddy) talks to this. It listens on 127.0.0.1 by default and has no
 login. Standard library only; generation runs the pipeline as a separate process.
@@ -53,6 +57,8 @@ STEPS = {
     ),
 }
 TRANSCRIBED = {"all": 0.6, "sheet": 0.8}  # how far along a run is when transcription ends
+AUTO_CHECK = 300   # seconds between looks for new recordings of the --auto shows
+AUTO_SETTLE = 900  # seconds after a recording is added before its job starts; Plex's commercial detection goes first
 
 
 def episode_name(item):
@@ -281,21 +287,34 @@ class Daemon:
             })
         return {"recordings": rows, "error": error}
 
-    def seek(self, key, client_id, position):
-        """Move the playback of this recording on this player to `position` seconds."""
+    def playing_on(self, key, client_id):
+        """The session of this recording on this player, and the player, for sending it a command."""
         found = self.read_now()  # asked now, not the copy that may be two seconds old
         session = next((p for p in found["playing"] if p["key"] == key and p["client"] == client_id), None)
         if session is None:
             raise KeyError("that recording is not playing on that player right now")
-        if session["duration"]:
-            position = min(position, session["duration"] - 5)
-        position = max(0.0, position)
         player = self.client.player(client_id)
         if player is None:
             raise plex.PlayerError(session["player"] + " does not take remote-control commands through Plex")
+        return session, player
+
+    def seek(self, key, client_id, position):
+        """Move the playback of this recording on this player to `position` seconds."""
+        session, player = self.playing_on(key, client_id)
+        if session["duration"]:
+            position = min(position, session["duration"] - 5)
+        position = max(0.0, position)
         player.seek(position)
         self.now.expire()
         return {"player": session["player"], "position": position}
+
+    def playback(self, key, client_id, action):
+        if action not in ("pause", "play"):
+            raise ValueError('"action" is "pause" or "play"')
+        session, player = self.playing_on(key, client_id)
+        player.pause(resume=action == "play")
+        self.now.expire()
+        return {"player": session["player"], "action": action}
 
     def start_job(self, key, make="all"):
         if make not in STEPS:
@@ -307,6 +326,56 @@ class Daemon:
                 self.recent.expire()
                 return job
         raise KeyError(error or "that recording is not among the newest ones")
+
+
+class Auto:
+    """Starts the full job, once, for each new recording of the chosen shows."""
+
+    def __init__(self, daemon, shows, folder):
+        self.daemon, self.shows = daemon, {show.lower() for show in shows}
+        self.path = os.path.join(folder, "auto.json")
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                self.state = json.load(f)
+        except (OSError, ValueError):
+            self.state = {"since": int(time.time()), "started": []}  # older recordings are left alone
+            self.save()
+        threading.Thread(target=self.watch, daemon=True).start()
+
+    def save(self):
+        self.state["started"] = self.state["started"][-200:]
+        with open(self.path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(self.state, f, indent=1)
+        os.replace(self.path + ".tmp", self.path)
+
+    def due(self, now=None):
+        """The recordings that should get a job now."""
+        now = now or time.time()
+        found = []
+        for recording in self.daemon.client.recent(30):
+            if ((recording.get("show") or "").lower() in self.shows and recording["added"] >= self.state["since"]
+                    and now - recording["added"] >= AUTO_SETTLE and "/.grab/" not in recording["file"]
+                    and recording["file"] not in self.state["started"]
+                    and not sheets.sheet_for(self.daemon.site, recording["file"])
+                    and not self.daemon.jobs.latest_for(recording["file"])):
+                found.append(recording)
+        return found
+
+    def watch(self):
+        while True:
+            try:
+                due = self.due()
+                # Not while Plex is still marking the commercials of a recording.
+                if due and subprocess.run(["pgrep", "-f", "Plex Commercial Skipper"], stdout=subprocess.DEVNULL).returncode:
+                    for recording in due:
+                        job = self.daemon.jobs.start(recording)
+                        self.state["started"].append(recording["file"])
+                        self.save()
+                        print(f"[auto] job {job['id']} for {describe(recording)}", flush=True)
+                    self.daemon.recent.expire()
+            except Exception as error:  # Plex down or an odd reply: try again next time
+                print(f"[auto] {error}", flush=True)
+            time.sleep(AUTO_CHECK)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -336,6 +405,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.reply(200, daemon.start_job(body["key"], body.get("make", "all")))
             if self.path == "/api/seek":
                 return self.reply(200, daemon.seek(str(body["key"]), str(body["client"]), float(body["position"])))
+            if self.path == "/api/playback":
+                return self.reply(200, daemon.playback(str(body["key"]), str(body["client"]), str(body["action"])))
             if self.path == "/api/jobs/cancel":
                 job = daemon.jobs.cancel(int(body["id"]))
                 daemon.recent.expire()
@@ -363,11 +434,14 @@ class Handler(SimpleHTTPRequestHandler):
             super().log_message(format, *args)
 
 
-def serve(site, work, port=8766, listen="127.0.0.1", plex_url="http://localhost:32400", token_file=None, threads=3):
+def serve(site, work, port=8766, listen="127.0.0.1", plex_url="http://localhost:32400", token_file=None, threads=3,
+          auto=()):
     client = plex.PlexClient(plex_url, plex.load_token(token_file))
     server = ThreadingHTTPServer((listen, port), functools.partial(Handler, directory=site))
     plex_args = ["--plex-url", plex_url] + (["--plex-token-file", token_file] if token_file else [])
     server.app = Daemon(client, site, work, threads, plex_args)
+    if auto:
+        Auto(server.app, auto, server.app.jobs.folder)
     print(f"plex-cc-fixer API on http://{listen}:{port}/ (pages from {site}, work in {work})", flush=True)
     server.serve_forever()
 
@@ -381,8 +455,11 @@ def main(argv=None):
     p.add_argument("--plex-url", default="http://localhost:32400")
     p.add_argument("--plex-token-file", default=None, help="file containing the Plex token (or set PLEX_TOKEN)")
     p.add_argument("--threads", type=int, default=3, help="CPU threads Whisper may use in a generation job")
+    p.add_argument("--auto", action="append", default=[], metavar="SHOW",
+                   help="make the subtitle and cheat sheet of each new recording of this show by itself; repeatable")
     a = p.parse_args(argv)
-    serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads)
+    sys.stderr.reconfigure(line_buffering=True)  # Python 3.8 holds back request log lines under systemd otherwise
+    serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads, a.auto)
 
 
 if __name__ == "__main__":

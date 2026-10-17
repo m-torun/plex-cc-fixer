@@ -128,7 +128,8 @@ class PlexClient:
         """The player with this Plex client id, when Plex lists it as one that takes commands."""
         for entry in self._get_xml("/clients", timeout=5):
             if entry.get("machineIdentifier") == client_id and entry.get("host") and entry.get("port"):
-                return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "")
+                roku = "roku" in (entry.get("platform", "") + entry.get("product", "")).lower()
+                return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "", roku)
         return None
 
     def subtitle_titles(self, rating_key):
@@ -164,8 +165,26 @@ class Player:
     SENDER = "plex-cc-fixer"
     ids = itertools.count(int(time.time()) % 1000000)
 
-    def __init__(self, host, port, client_id, name=""):
+    ROKU_PLEX_APP = 13535  # the Plex app's id on a Roku
+
+    def __init__(self, host, port, client_id, name="", roku=False):
         self.address, self.client_id, self.name = f"http://{host}:{port}", client_id, name or "the player"
+        self.roku = f"http://{host}:8060" if roku else None  # the Roku's own control API
+
+    def wake(self):
+        """A Roku shows its screensaver a few minutes into a pause, and its Plex app then answers nothing.
+        Opening the app again takes the screensaver away."""
+        if not self.roku:
+            return
+        try:
+            with urllib.request.urlopen(f"{self.roku}/query/active-app", timeout=3) as response:
+                asleep = b"<screensaver" in response.read()
+            if asleep:
+                launch = urllib.request.Request(f"{self.roku}/launch/{self.ROKU_PLEX_APP}", data=b"", method="POST")
+                urllib.request.urlopen(launch, timeout=5).read()
+                time.sleep(1.5)
+        except OSError:
+            pass  # then the command itself says the player does not answer
 
     def send(self, path, params, timeout=6):
         query = urllib.parse.urlencode(dict(params, commandID=next(Player.ids)))
@@ -180,6 +199,7 @@ class Player:
 
     def video(self):
         """State, and position in seconds, of the video the player has open. Asked twice: the first answer can be stale."""
+        self.wake()
         found = ("", None)
         for attempt in range(2):
             for element in ET.fromstring(self.send("/player/timeline/poll", {"wait": 0})).iter("Timeline"):
@@ -198,3 +218,15 @@ class Player:
         if state not in ("playing", "paused") or position is None:
             raise PlayerError(f"{self.name} is not playing anything it can jump in")
         self.send("/player/playback/seekTo", {"type": "video", "offset": int(round(seconds * 1000))})
+        if state == "paused":
+            # A jump means play from there. A Roku plays on by itself after a jump; a player that stays paused is told to.
+            time.sleep(3)
+            if self.video()[0] == "paused":
+                self.send("/player/playback/play", {"type": "video"})
+
+    def pause(self, resume=False):
+        """Pause playback, or with `resume` play on, under the same rule as `seek`."""
+        state, position = self.video()
+        if state not in ("playing", "paused") or position is None:
+            raise PlayerError(f"{self.name} is not playing anything it can pause")
+        self.send("/player/playback/" + ("play" if resume else "pause"), {"type": "video"})
