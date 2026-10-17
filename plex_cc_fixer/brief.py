@@ -3,6 +3,7 @@ import datetime
 import html
 import json
 import os
+import re
 import urllib.parse
 
 from .captions import srt_ts
@@ -11,7 +12,20 @@ from .sheets import clock, page, relative_page
 KINDS = ["cold open", "monologue", "sketch", "pretaped", "news desk", "music", "interview", "goodnights", "other"]
 
 LEAD_IN = 3  # seconds before a segment's start that its Play button jumps to
+# Who watches, in the research prompt's words: personal_details.md beside the package, which git ignores,
+# or the generic example kept in the repository.
+DETAILS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "personal_details.md")
 NO_BREAK = 30  # at most this many seconds between two segments: no commercial break, the second follows straight on
+
+GLOSSARY = {  # a segment's notes: things it leans on, each with what it is
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {"topic": {"type": "string"}, "explanation": {"type": "string"}},
+        "required": ["topic", "explanation"],
+        "additionalProperties": False,
+    },
+}
 
 SCHEMA = {
     "type": "object",
@@ -38,15 +52,8 @@ SCHEMA = {
                     "kind": {"type": "string", "enum": KINDS},
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "know_before": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {"topic": {"type": "string"}, "explanation": {"type": "string"}},
-                            "required": ["topic", "explanation"],
-                            "additionalProperties": False,
-                        },
-                    },
+                    "know_before": GLOSSARY,
+                    "likely_known": GLOSSARY,
                     "title": {"type": "string"},
                     "premise": {"type": "string"},
                     "whos_who": {
@@ -61,7 +68,7 @@ SCHEMA = {
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "sources": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["kind", "start", "end", "know_before", "title", "premise", "whos_who",
+                "required": ["kind", "start", "end", "know_before", "likely_known", "title", "premise", "whos_who",
                              "confidence", "sources"],
                 "additionalProperties": False,
             },
@@ -74,23 +81,26 @@ SCHEMA = {
 
 PROMPT = """I recorded a TV episode off the air. I want two things from you: the list of its segments with their times, and for each segment a short glossary of the background a viewer needs in order to get the jokes.
 
-The viewer is an adult who follows the news loosely and did not grow up in the United States. He misses jokes that lean on things he has not seen: a news story or social-media moment from recent weeks, an American advert, an old TV show or film, a celebrity's public image, a politician's verbal habits, a regional stereotype. He reads your notes on his phone just before each segment, and uses the list to jump the playback to a segment.
+{viewer}
 
-He found an earlier version of these notes spoiled the show: it summarised each segment before he watched it, and its explanations described what happens in the bit. A segment's title is fine with him, and he needs it to keep track of where he is and to find a segment. Beyond the title, nothing he sees may say what happens in a segment or how it uses the things you explain. Two fields are what he sees:
+They miss jokes that lean on things they have not seen: a news story or social-media moment from recent weeks, an American advert, an old TV show or film, a celebrity's public image, a politician's verbal habits, a regional stereotype. They read your notes on their phone just before each segment, and use the list to jump the playback to a segment.
 
-- title: the segment's name on his screen. Use the title the segment is usually listed under (the show's own, or the one recaps use), so that he recognises the segment when it starts and can find it again. Where the title alone does not say what kind of segment it is, say so in it: "Cold open: " and its title, "Monologue", the artist and song for music, the news segment under its own name, "Goodnights". Keep it a title, with no description added. Where the usual title itself gives away a punchline or a surprise, such as an unannounced guest's name or the twist, use a plainer name he can still recognise the segment by, such as its setting.
-- know_before: a glossary of the real things the segment leans on that he may not know: people, news stories, adverts, products and brands, programmes and films, songs, phrases, stereotypes, including ones that come up only in passing, such as a drink a character carries or a celebrity named in one line. List all of them. An earlier version that did so helped him get most of the jokes; a later one that kept only the most important few left him lost at the rest. Each entry names the thing and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Leave out what any adult anywhere would know, and leave out an entry only when its mere presence would give away a surprise, such as an unannounced guest. A segment that leans on nothing gets an empty list.
+They found an earlier version of these notes spoiled the show: it summarised each segment before they watched it, and its explanations described what happens in the bit. A segment's title is fine with them, and they need it to keep track of where they are and to find a segment. Beyond the title, nothing they see may say what happens in a segment or how it uses the things you explain. Three fields are what they see:
 
-Two more fields are for the subtitle editor and are never shown to him, so they should say plainly what the segment is: premise (one line on what it is about) and whos_who (performer and who they play).
+- title: the segment's name on their screen. Use the title the segment is usually listed under (the show's own, or the one recaps use), so that they recognise the segment when it starts and can find it again. Where the title alone does not say what kind of segment it is, say so in it: "Cold open: " and its title, "Monologue", the artist and song for music, the news segment under its own name, "Goodnights". Keep it a title, with no description added. Where the usual title itself gives away a punchline or a surprise, such as an unannounced guest's name or the twist, use a plainer name they can still recognise the segment by, such as its setting.
+- know_before: a glossary of the real things the segment leans on that the viewer may not know: people, news stories, adverts, products and brands, programmes and films, songs, phrases, stereotypes, including ones that come up only in passing, such as a drink a character carries or a celebrity named in one line. List all of them. An earlier version that did so helped them get most of the jokes; a later one that kept only the most important few left them lost at the rest. Each entry names the thing and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Leave out what any adult anywhere would know, and leave out an entry only when its mere presence would give away a surprise, such as an unannounced guest. What the viewer very likely knows already goes in likely_known instead. A segment that leans on nothing gets an empty list.
+- likely_known: the things the segment leans on that the viewer very likely knows already, going by who they are as described above, such as a nationwide chain, a big brand or a long-famous celebrity. They are listed anyway, just in case, under "You probably know these". Same form and the same rules as know_before. Each thing goes in one list only; when unsure whether the viewer knows it, put it in know_before.
+
+Two more fields are for the subtitle editor and are never shown to them, so they should say plainly what the segment is: premise (one line on what it is about) and whos_who (performer and who they play).
 
 The recording: {identity}. The file starts a little before the programme and includes the commercial breaks. Leave out the commercials and anything from other programmes before or after.
 
 Work like this:
 1. Search the web for this episode: the sketch list, recaps and reviews. Use them to name the segments and learn what each is about.
-2. Match them to the transcript below and give each segment's start and end time, in the transcript's own clock. He jumps to the start time, so put it at the segment's first words, not in the commercial before it.
+2. Match them to the transcript below and give each segment's start and end time, in the transcript's own clock. The viewer jumps to the start time, so put it at the segment's first words, not in the commercial before it.
 3. For each segment, work out everything it leans on, and search for anything you are not sure of (the advert being parodied, the news story, the person being impersonated).
 
-Always look for the programme's sign-off when it has one: the host's thank-yous and goodbyes at the very end, after the last commercial break (kind goodnights). His player tends to skip it as if it were the credits, and this list is how he finds it, so give its start exactly. If the transcript ends before it, say in notes that the recording stops before the goodbyes.
+Always look for the programme's sign-off when it has one: the host's thank-yous and goodbyes at the very end, after the last commercial break (kind goodnights). Their player tends to skip it as if it were the credits, and this list is how they find it, so give its start exactly. If the transcript ends before it, say in notes that the recording stops before the goodbyes.
 
 This is best effort. Where you cannot find out what a segment refers to, leave its glossary empty and mark it low confidence. An honest gap is more useful than an invented explanation.
 
@@ -98,7 +108,7 @@ Also collect the names likely to be spoken (cast, host, guests, recurring charac
 
 What to return:
 - episode: the show, season and episode, air date, host, musical guest, the cast appearing, and the names to expect.
-- segments, in running order. For each: title; kind; start and end as H:MM:SS; know_before (topic and explanation pairs); premise and whos_who for the editor; confidence; sources (the pages you relied on).
+- segments, in running order. For each: title; kind; start and end as H:MM:SS; know_before and likely_known (topic and explanation pairs); premise and whos_who for the editor; confidence; sources (the pages you relied on).
 - notes: one or two sentences for the viewer about gaps in this sheet (a segment you could not place, a time you are unsure of, the recording stopping early), giving away nothing. Empty if none. Nothing else belongs there.
 
 The transcript, as time | text:
@@ -184,10 +194,21 @@ def seconds(clock):
     return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
 
+def viewer():
+    """The description of the viewer that the research prompt starts from, without the file's comments."""
+    for path in (DETAILS, DETAILS[:-len(".md")] + ".example.md"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return re.sub(r"<!--.*?-->", "", f.read(), flags=re.S).strip()
+        except OSError:
+            continue
+    return "The viewer is an adult who follows the news loosely."
+
+
 def research(cues, identity, claude, log=print):
     """Ask Claude, with web search, for the episode's facts and segment notes."""
     transcript = "\n".join(f"{srt_ts(cue['start'])[:8]} | {cue['text']}" for cue in cues)
-    facts = claude.ask(PROMPT.format(identity=identity, transcript=transcript), SCHEMA, effort="high",
+    facts = claude.ask(PROMPT.format(viewer=viewer(), identity=identity, transcript=transcript), SCHEMA, effort="high",
                        tools=("WebSearch", "WebFetch"), timeout=2400)
     for segment in facts.get("segments", []):
         segment["start_seconds"] = seconds(segment.get("start", ""))
@@ -198,7 +219,7 @@ def research(cues, identity, claude, log=print):
 
 
 def shown_name(segment):
-    """What the viewer sees as a segment's name: its title, which is how he finds his place."""
+    """What the viewer sees as a segment's name: its title, which is how they find their place."""
     return segment.get("title") or segment.get("kind", "")
 
 
@@ -243,6 +264,10 @@ def render_brief(code, facts, changes_page=None):
                                          for item in segment["know_before"]) + "</dl>")
         elif segment.get("confidence") != "low":
             part.append("<p class=\"dim\">Nothing you need to know first.</p>")
+        if segment.get("likely_known"):
+            part.append("<div class=\"known\"><p>You probably know these, but just in case:</p><dl>" + "".join(
+                f"<dt>{e(item.get('topic', ''))}</dt><dd>{e(item.get('explanation', ''))}</dd>"
+                for item in segment["likely_known"]) + "</dl></div>")
         if segment.get("confidence") == "low":
             part.append("<p class=\"dim\">Not much could be found about this one.</p>")
         links = [s for s in segment.get("sources", []) if s.startswith("http")]
