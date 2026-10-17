@@ -45,6 +45,9 @@ button.pause:disabled { color: var(--dim); }
 .kind { color: var(--dim); font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }
 .button { display: block; margin-top: .8rem; padding: .7rem 1rem; border-radius: 10px; background: var(--accent); color: var(--on-accent); text-align: center; text-decoration: none; font-weight: 600; }
 dl { margin: .6rem 0 0; }
+.known { margin-top: .8rem; padding-top: .5rem; border-top: 1px dashed var(--line); color: var(--dim); font-size: .92rem; }
+.known p { margin: 0; }
+.known dt { color: var(--dim); }
 dt { font-weight: 600; margin-top: .6rem; }
 dd { margin: .1rem 0 0; }
 ul { padding-left: 1.2rem; margin: .4rem 0; }

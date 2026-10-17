@@ -64,6 +64,8 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
 
 Answers from Claude are cached in `work/<episode>/llm/`, and the research in `research.json`, so a re-run costs nothing. `--refresh` redoes the research. The cheat sheet is best effort: it depends on recaps being published, and it can be wrong.
 
+The research starts from a description of the viewer, which decides what a sheet explains and what it lists apart under "You probably know these". It is read from `personal_details.md`, which git ignores; copy `personal_details.example.md` to it and describe the viewer there. Without it the generic example is used.
+
 ### The daemon
 
 ```bash
