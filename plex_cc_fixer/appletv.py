@@ -5,12 +5,13 @@ process for a player on an Apple TV. pyatv is not part of the standard library; 
     python3 -m pip install --target DIR pyatv
 and give DIR to the daemon as --pyatv (or install it where python3 finds it).
 
-  python3 -m plex_cc_fixer.appletv pair --host IP --credentials FILE [--pin-file F]
+  python3 -m plex_cc_fixer.appletv pair --host IP [--protocol airplay|companion] [--pin-file F]
   python3 -m plex_cc_fixer.appletv state|pause|play --host IP --credentials FILE
   python3 -m plex_cc_fixer.appletv seek SECONDS --host IP --credentials FILE
 
-Pairing makes the Apple TV show a PIN, which is typed in here (or written to --pin-file). The
-credentials it saves let this control that Apple TV from then on: keep the file private.
+Pairing makes the Apple TV show a PIN for a short while, which is typed in here (or written to --pin-file).
+Pair both protocols: AirPlay carries the playback commands, Companion the remote's buttons. The credentials
+it saves let this control that Apple TV from then on: keep the file private.
 """
 import argparse
 import asyncio
@@ -94,7 +95,8 @@ async def pair(args):
     import pyatv
     from pyatv.const import Protocol
     config = await find(args.host)
-    pairing = await pyatv.pair(config, Protocol.AirPlay, asyncio.get_event_loop())
+    protocol = {"airplay": Protocol.AirPlay, "companion": Protocol.Companion}[args.protocol]
+    pairing = await pyatv.pair(config, protocol, asyncio.get_event_loop())
     try:
         await pairing.begin()
         if pairing.device_provides_pin:
@@ -104,13 +106,14 @@ async def pair(args):
             raise SystemExit("the Apple TV did not accept the pairing")
         path = os.path.expanduser(args.credentials)
         known = saved(path)
-        known[config.identifier] = {"host": args.host, "name": config.name, "airplay": pairing.service.credentials}
+        entry = known.setdefault(config.identifier, {})
+        entry.update(host=args.host, name=config.name, **{args.protocol: pairing.service.credentials})
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         descriptor = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as f:
             json.dump(known, f, indent=1)
         os.replace(path + ".tmp", path)
-        print(f"Paired with {config.name}; credentials saved in {path}")
+        print(f"Paired with {config.name} ({args.protocol}); credentials saved in {path}")
     finally:
         await pairing.close()
 
@@ -122,7 +125,9 @@ async def control(args):
     entry = saved(args.credentials).get(config.identifier)
     if not entry:
         raise SystemExit(f"not paired with the Apple TV at {args.host}; run the pair command")
-    config.set_credentials(Protocol.AirPlay, entry["airplay"])
+    for name, protocol in (("airplay", Protocol.AirPlay), ("companion", Protocol.Companion)):
+        if entry.get(name):
+            config.set_credentials(protocol, entry[name])
     atv = await pyatv.connect(config, asyncio.get_event_loop())
     try:
         playing = await atv.metadata.playing()
@@ -151,6 +156,7 @@ def main(argv=None):
     p.add_argument("seconds", nargs="?", type=float, help="for seek: where to jump to")
     p.add_argument("--host", required=True, help="the Apple TV's address")
     p.add_argument("--credentials", default=CREDENTIALS, help="file the pairing credentials are kept in (default %(default)s)")
+    p.add_argument("--protocol", choices=["airplay", "companion"], default="airplay", help="for pair: which one")
     p.add_argument("--pin-file", help="for pair: read the PIN from this file once it appears, instead of asking")
     args = p.parse_args(argv)
     if args.command == "seek" and args.seconds is None:
