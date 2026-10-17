@@ -80,7 +80,7 @@ A long-running service with an HTTP API and no page of its own. An interface tal
 | `GET /api/recordings` | The newest recordings (up to 120), each with its show, whether it has a subtitle and a cheat sheet, and its latest generation job. |
 | `POST /api/jobs` | `{"key": "<Plex ratingKey>"}` starts `episode --polish --site` for that recording: the subtitle and the cheat sheet. With `"make": "sheet"` it starts `brief --site` instead: the cheat sheet alone, made from the subtitle already attached in Plex (the recording is transcribed only when there is none). One job runs at a time; more wait their turn. |
 | `POST /api/jobs/cancel` | `{"id": <job id>}` |
-| `POST /api/seek` | `{"key": "<Plex ratingKey>", "client": "<player's Plex client id>", "position": <seconds>}` moves the playback of that recording on that player, and plays on if it was paused. The cheat sheet pages use it for their Play buttons. The player has to be one Plex lists under `/clients`, or one the Plex account lists with a local address (Plex for Apple TV is only there); tested on a Roku. A Roku shows its screensaver about ten minutes into a pause, and its Plex app then drops the video: the daemon opens the Plex app again, opens the recording and moves it to the position. Resume does the same. |
+| `POST /api/seek` | `{"key": "<Plex ratingKey>", "client": "<player's Plex client id>", "position": <seconds>}` moves the playback of that recording on that player, and plays on if it was paused. The cheat sheet pages use it for their Play buttons. The player has to be one Plex lists under `/clients`, or an Apple TV paired as below; tested on a Roku. A Roku shows its screensaver about ten minutes into a pause, and its Plex app then drops the video: the daemon opens the Plex app again, opens the recording and moves it to the position. Resume does the same. |
 | `POST /api/playback` | `{"key": "<Plex ratingKey>", "client": "<player's Plex client id>", "action": "pause"}` pauses that playback; `"play"` resumes it. The cheat sheet pages use it for the Pause button beside each Play button. |
 | `GET /<path>.html` | The cheat sheet pages, as files from the site folder. |
 
@@ -89,7 +89,8 @@ A long-running service with an HTTP API and no page of its own. An interface tal
 - It needs the same Plex token and URL as the upload (`PLEX_TOKEN` or `--plex-token-file`, `--plex-url`), and the `claude` CLI for the editing pass and the cheat sheet.
 - It listens on `127.0.0.1` and has no login. `--listen 0.0.0.0` exposes it; then anyone who can reach the port can see what is being watched and start a job.
 - `--auto SHOW` (repeatable) starts the full job by itself for each new recording of that show, 15 minutes after Plex adds it and once Plex's commercial detection has finished. It looks every 5 minutes, runs each recording once (a failed job is not retried), and leaves alone recordings added before the option was first used; `<work>/jobs/auto.json` keeps track. It asks Plex rather than using Plex webhooks, which need setting up in the Plex account.
-- The server itself uses only the Python standard library. `deploy/plex-cc-fixer.service` is a systemd unit for it.
+- The server itself uses only the Python standard library. `deploy/install.sh` installs it as the systemd service `plex-cc-fixer`, running from the checkout as the user who runs the script, with its pages and work files in `~/plex-cc-fixer`. Its arguments go to the daemon, for example `deploy/install.sh --auto "Some Show"`; run it again to change them.
+- Plex for Apple TV takes no remote-control commands from Plex, so for a player on an Apple TV the daemon sends Pause, Play and jumps to the Apple TV itself, with [pyatv](https://pyatv.dev). Install pyatv with `python3 -m pip install --target DIR pyatv` and give the daemon `--pyatv DIR`. Pair once with `PYTHONPATH=DIR python3 -m plex_cc_fixer.appletv pair --host <Apple TV address>`: the TV shows a PIN to type in. The credentials go to `~/.config/plex-cc-fixer/appletv.json` (`--apple-tv-credentials`); keep that file private.
 - `tools/live_check.py` tests `/api/now` on a real player: it plays an item through Plex's remote-control protocol for a few seconds, checks that the daemon lists it, stops, and restores the watch state. The item shows on that player's screen while it runs.
 
 Compare Whisper settings on a short clip, then rate the outputs by ear:
@@ -149,12 +150,14 @@ plex_cc_fixer/
   llm.py        runs the `claude` CLI and caches its answers
   polish.py     the editing pass: prompt, word corrections, cue splits
   brief.py      web research and the cheat sheet pages
+  appletv.py    pause, play and jump on an Apple TV (pyatv)
   sheets.py     where the pages live in the site folder, and their shared style
   server.py     the daemon: API, cheat sheet pages, generation jobs
   plex.py       Plex search, subtitle upload, current sessions, recent recordings
   variants.py   configuration comparison on a clip
 deploy/
-  plex-cc-fixer.service        systemd unit for the daemon
+  plex-cc-fixer.service        systemd unit template for the daemon
+  install.sh                   fills it in and installs it
 tools/
   live_check.py                tests the daemon against a real player
 ```

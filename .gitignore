@@ -5,3 +5,4 @@ work/
 *.srt
 .DS_Store
 personal_details.md
+deploy/.unit

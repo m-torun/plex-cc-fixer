@@ -12,6 +12,9 @@
   POST /api/playback      {"key": "<ratingKey>", "client": "<player's Plex client id>", "action": "pause" | "play"}
   GET  /<path>            the cheat sheet pages, as files from the site folder
 
+A player on an Apple TV takes its commands through the Apple TV itself, once paired with
+plex_cc_fixer.appletv (Plex for Apple TV does not take them from Plex).
+
 With --auto SHOW, each new recording of that show gets the full job by itself once Plex has finished
 with it (recordings added before the option was first used are left alone).
 
@@ -30,7 +33,7 @@ import time
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from . import plex, sheets
+from . import appletv, plex, sheets
 
 KEPT_JOBS = 30
 LISTED = 120          # recordings in /api/recordings, newest first
@@ -62,7 +65,7 @@ AUTO_SETTLE = 900  # seconds after a recording is added before its job starts; P
 
 
 def episode_name(item):
-    """An episode's own name, without its show: "S52E03 · Shane Gillis; Rosalía"."""
+    """An episode's own name, without its show: "S01E02 · A Host; A Band"."""
     number = ""
     if item.get("season") and item.get("episode"):
         number = "S%02dE%02d" % (int(item["season"]), int(item["episode"]))
@@ -235,8 +238,9 @@ class Jobs:
 
 
 class Daemon:
-    def __init__(self, client, site, work, threads, plex_args=()):
+    def __init__(self, client, site, work, threads, plex_args=(), apple_tv=appletv.CREDENTIALS, pyatv=None):
         self.client, self.site = client, site
+        self.apple_tv, self.pyatv = apple_tv, pyatv  # pairing credentials file, and where pyatv is installed
         self.subtitles = {}  # ratingKey -> (has a subtitle, when asked)
         self.jobs = Jobs(work, site, threads, self.job_finished, plex_args)
         self.now = Cached(self.read_now, 2.0)
@@ -254,6 +258,7 @@ class Daemon:
                     "key": session.get("key"), "client": session.get("client"), "label": describe(session),
                     "player": session.get("player") or session.get("product") or "",
                     "state": session.get("state") or "",
+                    "address": session.get("address"), "platform": session.get("platform") or "",
                     "position": (session.get("offset_ms") or 0) / 1000.0,
                     "duration": (session.get("duration_ms") or 0) / 1000.0,
                     "sheet": sheets.sheet_for(self.site, session["file"]) if session.get("file") else None,
@@ -294,6 +299,13 @@ class Daemon:
         if session is None:
             raise KeyError("that recording is not playing on that player right now")
         player = self.client.player(client_id)
+        if player is None and session["platform"] == "tvOS" and session["address"]:
+            # Plex for Apple TV takes no commands from Plex; the Apple TV itself does, once paired.
+            if appletv.paired(self.apple_tv, session["address"]):
+                player = appletv.AppleTV(session["address"], self.apple_tv, self.pyatv, session["player"])
+            else:
+                raise plex.PlayerError(f"{session['player']} is not paired yet: run python3 -m plex_cc_fixer.appletv pair "
+                                       f"--host {session['address']} --credentials {self.apple_tv}")
         if player is None:
             raise plex.PlayerError(session["player"] + " does not take remote-control commands through Plex")
         return session, player
@@ -444,11 +456,11 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def serve(site, work, port=8766, listen="127.0.0.1", plex_url="http://localhost:32400", token_file=None, threads=3,
-          auto=()):
+          auto=(), apple_tv=appletv.CREDENTIALS, pyatv=None):
     client = plex.PlexClient(plex_url, plex.load_token(token_file))
     server = ThreadingHTTPServer((listen, port), functools.partial(Handler, directory=site))
     plex_args = ["--plex-url", plex_url] + (["--plex-token-file", token_file] if token_file else [])
-    server.app = Daemon(client, site, work, threads, plex_args)
+    server.app = Daemon(client, site, work, threads, plex_args, apple_tv, pyatv)
     if auto:
         Auto(server.app, auto, server.app.jobs.folder)
     print(f"plex-cc-fixer API on http://{listen}:{port}/ (pages from {site}, work in {work})", flush=True)
@@ -466,9 +478,13 @@ def main(argv=None):
     p.add_argument("--threads", type=int, default=3, help="CPU threads Whisper may use in a generation job")
     p.add_argument("--auto", action="append", default=[], metavar="SHOW",
                    help="make the subtitle and cheat sheet of each new recording of this show by itself; repeatable")
+    p.add_argument("--apple-tv-credentials", default=appletv.CREDENTIALS, metavar="FILE",
+                   help="pairing credentials of Apple TVs (see plex_cc_fixer.appletv); default %(default)s")
+    p.add_argument("--pyatv", metavar="DIR", help="folder pyatv was installed into with pip --target, if not on the path")
     a = p.parse_args(argv)
     sys.stderr.reconfigure(line_buffering=True)  # Python 3.8 holds back request log lines under systemd otherwise
-    serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads, a.auto)
+    serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads, a.auto,
+          os.path.expanduser(a.apple_tv_credentials), a.pyatv)
 
 
 if __name__ == "__main__":

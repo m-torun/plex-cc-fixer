@@ -1,5 +1,4 @@
 import itertools
-import json
 import os
 import socket
 import time
@@ -56,6 +55,8 @@ class PlexClient:
                 "player": player.get("title"),
                 "product": player.get("product"),
                 "state": player.get("state"),
+                "address": player.get("address"),
+                "platform": player.get("platform"),
             })
         return playing
 
@@ -132,55 +133,7 @@ class PlexClient:
             if entry.get("machineIdentifier") == client_id and entry.get("host") and entry.get("port"):
                 roku = "roku" in (entry.get("platform", "") + entry.get("product", "")).lower()
                 return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "", roku)
-        # Some apps, such as Plex for Apple TV, are missing from the server's list but tell the account where they listen.
-        for device in self.account_players():
-            if device.get("clientIdentifier") == client_id:
-                for connection in device.get("connections") or []:
-                    address = urllib.parse.urlsplit(connection.get("uri") or "")
-                    if connection.get("local") and address.hostname and address.port:
-                        return Player(address.hostname, address.port, client_id, device.get("name") or "")
         return None
-
-    def account_players(self):
-        """The players signed in to the Plex account, as plex.tv lists them. Remembered for a few minutes."""
-        cached = self.__dict__.get("_account")
-        if cached and time.time() - cached[0] < 300:
-            return cached[1]
-        request = urllib.request.Request("https://plex.tv/api/v2/resources?" + urllib.parse.urlencode({
-            "includeHttps": 1, "X-Plex-Token": self.token, "X-Plex-Client-Identifier": Player.SENDER}),
-            headers={"Accept": "application/json"})
-        try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                found = [d for d in json.load(response) if "player" in (d.get("provides") or "").split(",")]
-        except (OSError, ValueError):
-            found = []
-        self._account = (time.time(), found)
-        return found
-
-    def play_on(self, player, rating_key, seconds):
-        """Open a library item on a player and move it to `seconds`. For a player that has dropped what it was
-        playing: a Roku does when its screensaver comes on during a pause."""
-        server = self._get_xml("/identity", timeout=5).get("machineIdentifier")
-        key = f"/library/metadata/{rating_key}"
-        request = urllib.request.Request(self._url("/playQueues", {
-            "type": "video", "uri": f"server://{server}/com.plexapp.plugins.library{key}",
-            "shuffle": 0, "repeat": 0, "continuous": 0, "own": 1}), data=b"", method="POST",
-            headers={"X-Plex-Client-Identifier": Player.SENDER, "X-Plex-Product": Player.SENDER})  # Plex refuses a queue without them
-        with urllib.request.urlopen(request, timeout=10) as response:
-            queue = ET.fromstring(response.read()).get("playQueueID")
-        token = self._get_xml("/security/token", {"type": "delegation", "scope": "all"}, timeout=5).get("token")
-        # The address the player reaches this server at: the one this machine uses to reach the player.
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect((player.host, 9))
-            address = probe.getsockname()[0]
-        player.send("/player/playback/playMedia", {
-            "key": key, "offset": 0, "machineIdentifier": server, "address": address,
-            "port": urllib.parse.urlsplit(self.url).port or 32400, "protocol": "http", "type": "video",
-            "token": token, "providerIdentifier": "com.plexapp.plugins.library",
-            "containerKey": f"/playQueues/{queue}?window=100&own=1"}, timeout=15)
-        player.wait_playing()
-        # A Roku ignores a start offset in playMedia, so the position is set once it plays.
-        player.send("/player/playback/seekTo", {"type": "video", "offset": int(round(seconds * 1000))})
 
     def subtitle_titles(self, rating_key):
         root = self._get_xml(f"/library/metadata/{rating_key}")
@@ -240,7 +193,7 @@ class Player:
             urllib.request.urlopen(launch, timeout=5).read()
         except OSError:
             return  # then the command itself says the player does not answer
-        for attempt in range(20):  # until the app answers again
+        for _ in range(20):  # until the app answers again
             time.sleep(1)
             try:
                 self.send("/player/timeline/poll", {"wait": 0}, timeout=3)
@@ -274,7 +227,7 @@ class Player:
         """State, and position in seconds, of the video the player has open. Asked twice: the first answer can be stale."""
         self.wake()
         found = ("", None)
-        for attempt in range(2):
+        for _ in range(2):
             for element in ET.fromstring(self.send("/player/timeline/poll", {"wait": 0})).iter("Timeline"):
                 if element.get("type") == "video":
                     position = element.get("time", "")
