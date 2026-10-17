@@ -1,4 +1,5 @@
 import itertools
+import json
 import os
 import socket
 import time
@@ -131,7 +132,30 @@ class PlexClient:
             if entry.get("machineIdentifier") == client_id and entry.get("host") and entry.get("port"):
                 roku = "roku" in (entry.get("platform", "") + entry.get("product", "")).lower()
                 return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "", roku)
+        # Some apps, such as Plex for Apple TV, are missing from the server's list but tell the account where they listen.
+        for device in self.account_players():
+            if device.get("clientIdentifier") == client_id:
+                for connection in device.get("connections") or []:
+                    address = urllib.parse.urlsplit(connection.get("uri") or "")
+                    if connection.get("local") and address.hostname and address.port:
+                        return Player(address.hostname, address.port, client_id, device.get("name") or "")
         return None
+
+    def account_players(self):
+        """The players signed in to the Plex account, as plex.tv lists them. Remembered for a few minutes."""
+        cached = self.__dict__.get("_account")
+        if cached and time.time() - cached[0] < 300:
+            return cached[1]
+        request = urllib.request.Request("https://plex.tv/api/v2/resources?" + urllib.parse.urlencode({
+            "includeHttps": 1, "X-Plex-Token": self.token, "X-Plex-Client-Identifier": Player.SENDER}),
+            headers={"Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                found = [d for d in json.load(response) if "player" in (d.get("provides") or "").split(",")]
+        except (OSError, ValueError):
+            found = []
+        self._account = (time.time(), found)
+        return found
 
     def play_on(self, player, rating_key, seconds):
         """Open a library item on a player and move it to `seconds`. For a player that has dropped what it was
