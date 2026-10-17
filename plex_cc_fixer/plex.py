@@ -164,7 +164,8 @@ class PlexClient:
         key = f"/library/metadata/{rating_key}"
         request = urllib.request.Request(self._url("/playQueues", {
             "type": "video", "uri": f"server://{server}/com.plexapp.plugins.library{key}",
-            "shuffle": 0, "repeat": 0, "continuous": 0, "own": 1}), data=b"", method="POST")
+            "shuffle": 0, "repeat": 0, "continuous": 0, "own": 1}), data=b"", method="POST",
+            headers={"X-Plex-Client-Identifier": Player.SENDER, "X-Plex-Product": Player.SENDER})  # Plex refuses a queue without them
         with urllib.request.urlopen(request, timeout=10) as response:
             queue = ET.fromstring(response.read()).get("playQueueID")
         token = self._get_xml("/security/token", {"type": "delegation", "scope": "all"}, timeout=5).get("token")
