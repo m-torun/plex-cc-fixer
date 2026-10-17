@@ -304,7 +304,11 @@ class Daemon:
         if session["duration"]:
             position = min(position, session["duration"] - 5)
         position = max(0.0, position)
-        player.seek(position)
+        try:
+            player.seek(position)
+        except plex.NothingOpen:
+            # Plex still has the session but the player dropped the video (a Roku's screensaver): open it again there.
+            self.client.play_on(player, key, position)
         self.now.expire()
         return {"player": session["player"], "position": position}
 
@@ -312,7 +316,12 @@ class Daemon:
         if action not in ("pause", "play"):
             raise ValueError('"action" is "pause" or "play"')
         session, player = self.playing_on(key, client_id)
-        player.pause(resume=action == "play")
+        try:
+            player.pause(resume=action == "play")
+        except plex.NothingOpen:
+            if action == "pause":
+                raise
+            self.client.play_on(player, key, session["position"])  # Resume: open it again where it was
         self.now.expire()
         return {"player": session["player"], "action": action}
 
