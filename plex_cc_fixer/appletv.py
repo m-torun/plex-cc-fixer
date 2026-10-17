@@ -10,8 +10,9 @@ and give DIR to the daemon as --pyatv (or install it where python3 finds it).
   python3 -m plex_cc_fixer.appletv seek SECONDS --host IP --credentials FILE
 
 Pairing makes the Apple TV show a PIN for a short while, which is typed in here (or written to --pin-file).
-Pair both protocols: AirPlay carries the playback commands, Companion the remote's buttons. The credentials
-it saves let this control that Apple TV from then on: keep the file private.
+AirPlay carries the playback commands, and is the one to pair. (Companion pairs too, but on tvOS 26 its
+commands time out with pyatv 0.15, and connecting with it costs five seconds, so it is not used.) The
+credentials saved let this control that Apple TV from then on: keep the file private.
 """
 import argparse
 import asyncio
@@ -125,9 +126,9 @@ async def control(args):
     entry = saved(args.credentials).get(config.identifier)
     if not entry:
         raise SystemExit(f"not paired with the Apple TV at {args.host}; run the pair command")
-    for name, protocol in (("airplay", Protocol.AirPlay), ("companion", Protocol.Companion)):
-        if entry.get(name):
-            config.set_credentials(protocol, entry[name])
+    if not entry.get("airplay"):
+        raise SystemExit(f"the Apple TV at {args.host} is not paired for AirPlay; run the pair command")
+    config.set_credentials(Protocol.AirPlay, entry["airplay"])
     atv = await pyatv.connect(config, asyncio.get_event_loop())
     try:
         playing = await atv.metadata.playing()
