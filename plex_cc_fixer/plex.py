@@ -1,5 +1,6 @@
 import itertools
 import os
+import socket
 import time
 import urllib.parse
 import urllib.request
@@ -132,6 +133,30 @@ class PlexClient:
                 return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "", roku)
         return None
 
+    def play_on(self, player, rating_key, seconds):
+        """Open a library item on a player and move it to `seconds`. For a player that has dropped what it was
+        playing: a Roku does when its screensaver comes on during a pause."""
+        server = self._get_xml("/identity", timeout=5).get("machineIdentifier")
+        key = f"/library/metadata/{rating_key}"
+        request = urllib.request.Request(self._url("/playQueues", {
+            "type": "video", "uri": f"server://{server}/com.plexapp.plugins.library{key}",
+            "shuffle": 0, "repeat": 0, "continuous": 0, "own": 1}), data=b"", method="POST")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            queue = ET.fromstring(response.read()).get("playQueueID")
+        token = self._get_xml("/security/token", {"type": "delegation", "scope": "all"}, timeout=5).get("token")
+        # The address the player reaches this server at: the one this machine uses to reach the player.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect((player.host, 9))
+            address = probe.getsockname()[0]
+        player.send("/player/playback/playMedia", {
+            "key": key, "offset": 0, "machineIdentifier": server, "address": address,
+            "port": urllib.parse.urlsplit(self.url).port or 32400, "protocol": "http", "type": "video",
+            "token": token, "providerIdentifier": "com.plexapp.plugins.library",
+            "containerKey": f"/playQueues/{queue}?window=100&own=1"}, timeout=15)
+        player.wait_playing()
+        # A Roku ignores a start offset in playMedia, so the position is set once it plays.
+        player.send("/player/playback/seekTo", {"type": "video", "offset": int(round(seconds * 1000))})
+
     def subtitle_titles(self, rating_key):
         root = self._get_xml(f"/library/metadata/{rating_key}")
         return {s.get("title") for s in root.iter("Stream") if s.get("streamType") == "3"}
@@ -160,6 +185,10 @@ class PlayerError(RuntimeError):
     pass
 
 
+class NothingOpen(PlayerError):
+    """The player answers but has no video open."""
+
+
 class Player:
     """A Plex player, driven with the requests Plex's own apps use on one another."""
     SENDER = "plex-cc-fixer"
@@ -168,23 +197,42 @@ class Player:
     ROKU_PLEX_APP = 13535  # the Plex app's id on a Roku
 
     def __init__(self, host, port, client_id, name="", roku=False):
-        self.address, self.client_id, self.name = f"http://{host}:{port}", client_id, name or "the player"
+        self.host, self.address, self.client_id = host, f"http://{host}:{port}", client_id
+        self.name = name or "the player"
         self.roku = f"http://{host}:8060" if roku else None  # the Roku's own control API
 
     def wake(self):
         """A Roku shows its screensaver a few minutes into a pause, and its Plex app then answers nothing.
-        Opening the app again takes the screensaver away."""
+        Opening the app again takes the screensaver away, but the app has then dropped the paused video."""
         if not self.roku:
             return
         try:
             with urllib.request.urlopen(f"{self.roku}/query/active-app", timeout=3) as response:
                 asleep = b"<screensaver" in response.read()
-            if asleep:
-                launch = urllib.request.Request(f"{self.roku}/launch/{self.ROKU_PLEX_APP}", data=b"", method="POST")
-                urllib.request.urlopen(launch, timeout=5).read()
-                time.sleep(1.5)
+            if not asleep:
+                return
+            launch = urllib.request.Request(f"{self.roku}/launch/{self.ROKU_PLEX_APP}", data=b"", method="POST")
+            urllib.request.urlopen(launch, timeout=5).read()
         except OSError:
-            pass  # then the command itself says the player does not answer
+            return  # then the command itself says the player does not answer
+        for attempt in range(20):  # until the app answers again
+            time.sleep(1)
+            try:
+                self.send("/player/timeline/poll", {"wait": 0}, timeout=3)
+                return
+            except PlayerError:
+                pass
+
+    def wait_playing(self, limit=30):
+        since = time.time()
+        while time.time() - since < limit:
+            try:
+                if self.video()[0] == "playing":
+                    return
+            except PlayerError:
+                pass
+            time.sleep(1)
+        raise PlayerError(f"{self.name} did not start playing within {limit} s")
 
     def send(self, path, params, timeout=6):
         query = urllib.parse.urlencode(dict(params, commandID=next(Player.ids)))
@@ -216,7 +264,7 @@ class Player:
         reports a position: a seek sent to one with nothing open has crashed a player's app."""
         state, position = self.video()
         if state not in ("playing", "paused") or position is None:
-            raise PlayerError(f"{self.name} is not playing anything it can jump in")
+            raise NothingOpen(f"{self.name} is not playing anything it can jump in")
         self.send("/player/playback/seekTo", {"type": "video", "offset": int(round(seconds * 1000))})
         if state == "paused":
             # A jump means play from there. A Roku plays on by itself after a jump; a player that stays paused is told to.
@@ -228,5 +276,5 @@ class Player:
         """Pause playback, or with `resume` play on, under the same rule as `seek`."""
         state, position = self.video()
         if state not in ("playing", "paused") or position is None:
-            raise PlayerError(f"{self.name} is not playing anything it can pause")
+            raise NothingOpen(f"{self.name} is not playing anything it can pause")
         self.send("/player/playback/" + ("play" if resume else "pause"), {"type": "video"})
