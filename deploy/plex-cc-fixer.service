@@ -5,7 +5,7 @@ After=network.target plexmediaserver.service
 [Service]
 User=USER
 WorkingDirectory=/home/USER/code/plex-cc-fixer
-ExecStart=/usr/bin/python3 -m plex_cc_fixer.server --site /home/USER/plex-cc-fixer/site --work /home/USER/plex-cc-fixer/episodes --port 8766
+ExecStart=/usr/bin/python3 -m plex_cc_fixer.server --site /home/USER/plex-cc-fixer/site --work /home/USER/plex-cc-fixer/episodes --port 8766 --auto "Saturday Night Live"
 Restart=on-failure
 # A generation job runs for half an hour; give it a moment to stop when the service does.
 TimeoutStopSec=20

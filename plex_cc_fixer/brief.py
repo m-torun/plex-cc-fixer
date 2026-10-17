@@ -11,6 +11,7 @@ from .sheets import clock, page, relative_page
 KINDS = ["cold open", "monologue", "sketch", "pretaped", "news desk", "music", "interview", "goodnights", "other"]
 
 LEAD_IN = 3  # seconds before a segment's start that its Play button jumps to
+NO_BREAK = 30  # at most this many seconds between two segments: no commercial break, the second follows straight on
 
 SCHEMA = {
     "type": "object",
@@ -78,7 +79,7 @@ The viewer is an adult who follows the news loosely. They miss jokes that lean o
 They found an earlier version of these notes spoiled the show: it summarised each segment before they watched it, and its explanations described what happens in the bit. A segment's title is fine with them, and they need it to keep track of where they are and to find a segment. Beyond the title, nothing they see may say what happens in a segment or how it uses the things you explain. Two fields are what they see:
 
 - title: the segment's name on their screen. Use the title the segment is usually listed under (the show's own, or the one recaps use), so that they recognise the segment when it starts and can find it again. Where the title alone does not say what kind of segment it is, say so in it: "Cold open: " and its title, "Monologue", the artist and song for music, the news segment under its own name, "Goodnights". Keep it a title, with no description added. Where the usual title itself gives away a punchline or a surprise, such as an unannounced guest's name or the twist, use a plainer name they can still recognise the segment by, such as its setting.
-- know_before: a glossary. Each entry names one real thing the segment assumes they know (a person, a news story, an advert, a programme, a phrase, a stereotype) and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Give only what they would be lost without, usually one to four entries, and none for a segment that needs none; do not pad. Leave out an entry whose mere presence would give away a surprise, such as an unannounced guest.
+- know_before: a glossary of the real things the segment leans on that they may not know: people, news stories, adverts, products and brands, programmes and films, songs, phrases, stereotypes, including ones that come up only in passing, such as a drink a character carries or a celebrity named in one line. List all of them. An earlier version that did so helped them get most of the jokes; a later one that kept only the most important few left them lost at the rest. Each entry names the thing and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Leave out what any adult anywhere would know, and leave out an entry only when its mere presence would give away a surprise, such as an unannounced guest. A segment that leans on nothing gets an empty list.
 
 Two more fields are for the subtitle editor and are never shown to them, so they should say plainly what the segment is: premise (one line on what it is about) and whos_who (performer and who they play).
 
@@ -87,7 +88,7 @@ The recording: {identity}. The file starts a little before the programme and inc
 Work like this:
 1. Search the web for this episode: the sketch list, recaps and reviews. Use them to name the segments and learn what each is about.
 2. Match them to the transcript below and give each segment's start and end time, in the transcript's own clock. They jump to the start time, so put it at the segment's first words, not in the commercial before it.
-3. For each segment, work out what it leans on, and search for anything you are not sure of (the advert being parodied, the news story, the person being impersonated).
+3. For each segment, work out everything it leans on, and search for anything you are not sure of (the advert being parodied, the news story, the person being impersonated).
 
 Always look for the programme's sign-off when it has one: the host's thank-yous and goodbyes at the very end, after the last commercial break (kind goodnights). Their player tends to skip it as if it were the credits, and this list is how they find it, so give its start exactly. If the transcript ends before it, say in notes that the recording stops before the goodbyes.
 
@@ -109,6 +110,7 @@ SCRIPT = """<script>
 (function () {
   const status = document.getElementById("now");
   const buttons = Array.from(document.querySelectorAll("button.jump"));
+  const pauses = Array.from(document.querySelectorAll("button.pause"));
   const rows = Array.from(document.querySelectorAll("nav .row"));
   const here = decodeURIComponent(location.pathname);
   let playing = null, said = "", saidUntil = 0;
@@ -119,12 +121,16 @@ SCRIPT = """<script>
   };
   function show() {
     buttons.forEach(button => { button.disabled = !playing; });
+    pauses.forEach(button => {
+      button.disabled = !playing;
+      button.textContent = playing && playing.state === "paused" ? "Resume" : "Pause";
+    });
     let current = null;
     if (playing) rows.forEach(row => { if (Number(row.dataset.at) <= playing.position + 1) current = row; });
     rows.forEach(row => row.classList.toggle("on", row === current));
     if (Date.now() < saidUntil) { status.textContent = said; return; }
     status.textContent = playing
-      ? "Playing on " + playing.player + ", at " + clock(playing.position) + (playing.state === "paused" ? " (paused)" : "") + ". Play jumps to a part."
+      ? (playing.state === "paused" ? "Paused" : "Playing") + " on " + playing.player + ", at " + clock(playing.position) + ". Play jumps to a part."
       : "Not playing in Plex right now. Start it there, and Play jumps to a part.";
   }
   function say(text) { said = text; saidUntil = Date.now() + 6000; status.textContent = text; }
@@ -146,6 +152,21 @@ SCRIPT = """<script>
       if (!response.ok) throw new Error(answer.error || response.statusText);
       say("Jumped to " + clock(at) + " on " + player + ".");
     } catch (error) { say("Could not jump: " + error.message); }
+    look();
+  }));
+  pauses.forEach(button => button.addEventListener("click", async () => {
+    if (!playing) return;
+    const action = playing.state === "paused" ? "play" : "pause", player = playing.player;
+    say((action === "pause" ? "Pausing" : "Resuming") + " on " + player + "…");
+    try {
+      const response = await fetch("/api/playback", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({key: playing.key, client: playing.client, action: action})});
+      const answer = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(answer.error || response.statusText);
+      playing.state = action === "pause" ? "paused" : "playing";
+      say((action === "pause" ? "Paused" : "Resumed") + " on " + player + ".");
+    } catch (error) { say("Could not " + action + ": " + error.message); }
+    look();
   }));
   look();
   setInterval(() => { if (document.visibilityState === "visible") look(); }, 3000);
@@ -193,18 +214,29 @@ def render_brief(code, facts, changes_page=None):
 
     def jump(segment, text):
         at = max(0, segment.get("start_seconds", 0) - LEAD_IN)
-        return f"<button class=\"jump\" data-at=\"{at:.0f}\" disabled>{text}</button>"
+        return (f"<span class=\"controls\"><button class=\"pause\" disabled>Pause</button>"
+                f"<button class=\"jump\" data-at=\"{at:.0f}\" disabled>{text}</button></span>")
 
+    def straight_on(n):
+        """True when segment n (from 1) runs into the next one with no commercial break between them."""
+        if n >= len(segments) or not segments[n - 1].get("end_seconds"):
+            return False
+        return segments[n].get("start_seconds", 0) - segments[n - 1]["end_seconds"] <= NO_BREAK
+
+    follows = "<span class=\"cont\">↳</span> "  # marks a segment that follows the one above with no break
     body.append("<nav>" + "".join(
         f"<div class=\"row\" data-at=\"{segment.get('start_seconds', 0):.0f}\"><a href=\"#s{n}\">"
-        f"<span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> {e(shown_name(segment))}</a>"
+        f"<span class=\"when\">{clock(segment.get('start_seconds', 0))}</span> "
+        f"<span>{follows if n > 1 and straight_on(n - 1) else ''}{e(shown_name(segment))}</span></a>"
         f"{jump(segment, 'Play')}</div>"
         for n, segment in enumerate(segments, 1)) + "</nav>")
+    if any(straight_on(n) for n in range(1, len(segments))):
+        body.append(f"<p class=\"dim\">{follows}follows the part above with no commercial break.</p>")
     if facts.get("notes"):
         body.append(f"<details><summary>What this sheet is missing</summary><p class=\"dim\">{e(facts['notes'])}</p></details>")
     for n, segment in enumerate(segments, 1):
         # The premise and the cast list stay in the facts for the subtitle editor; shown here they gave the segment away.
-        part = [f"<section class=\"seg\" id=\"s{n}\"><div class=\"head\"><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span>"
+        part = [f"<section class=\"seg{' joined' if n > 1 and straight_on(n - 1) else ''}\" id=\"s{n}\"><div class=\"head\"><span class=\"when\">{clock(segment.get('start_seconds', 0))}</span>"
                 f"{jump(segment, 'Play from here')}</div><h2>{e(shown_name(segment))}</h2>"]
         if segment.get("know_before"):
             part.append("<dl>" + "".join(f"<dt>{e(item.get('topic', ''))}</dt><dd>{e(item.get('explanation', ''))}</dd>"
@@ -217,6 +249,9 @@ def render_brief(code, facts, changes_page=None):
         if links:
             part.append("<details><summary>Sources</summary><ul>" + "".join(
                 f"<li><a href=\"{e(s, quote=True)}\">{e(s.split('/')[2])}</a></li>" for s in links) + "</ul></details>")
+        if straight_on(n):
+            part.append(f"<p class=\"next\">No commercial break: <a href=\"#s{n + 1}\">{e(shown_name(segments[n]))}</a> "
+                        "starts right after this, so read on.</p>")
         part.append("</section>")
         body.append("".join(part))
     footer = f"<p class=\"dim\">Made {datetime.date.today().isoformat()} by plex-cc-fixer. Best effort; it can be wrong."
