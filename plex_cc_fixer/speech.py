@@ -17,16 +17,22 @@ OVERLAP_TOL = 0.3
 SOUND_NEAR_SPEECH = 4.0
 SENTENCE_END = re.compile(r"[.!?][\"')\]]?$")
 CLAUSE_END = re.compile(r"[,;:][\"')\]]?$|-$")
+JOINS_PREVIOUS = re.compile(r"[-.]\w")
 ABBREVIATIONS = {"mr.", "mrs.", "ms.", "dr.", "st.", "vs.", "jr.", "sr.", "prof.", "gen.", "sen.", "rep.", "gov.",
                  "lt.", "col.", "sgt.", "capt.", "mt.", "no.", "u.s."}
 MIN_PIECE_SECONDS = 0.7
+STRANDED_GAP, STRANDED_WORDS, STRANDED_SECONDS = 1.5, 3, 1.5
 
 
 def asr_words(audio, model, device="cpu", compute="int8", language="en", prompt=None,
               beam_size=1, threads=0, log=print, **transcribe_kwargs):
     from faster_whisper import WhisperModel
     whisper = WhisperModel(model, device=device, compute_type=compute, cpu_threads=threads)
-    segments, _ = whisper.transcribe(audio, language=language, word_timestamps=True, vad_filter=True,
+    # Fed its own earlier text, Whisper can slip into writing no punctuation and stay there: nearly an hour of one
+    # recording had none, and cues are cut at sentence ends.
+    transcribe_kwargs.setdefault("condition_on_previous_text", False)
+    transcribe_kwargs.setdefault("vad_filter", True)
+    segments, _ = whisper.transcribe(audio, language=language, word_timestamps=True,
                                      beam_size=beam_size, initial_prompt=prompt, **transcribe_kwargs)
     words = []
     for seg in segments:
@@ -58,14 +64,40 @@ def render(words):
 
 
 def ends_sentence(token):
-    """True for "done." and "what?", false for "Mr." and for initials such as the "U." of "U. S."."""
+    """True for "done." and "what?", false for "Mr." and for initials such as "J.D." or the "U." of "U. S."."""
     if not SENTENCE_END.search(token):
         return False
-    return token.lower() not in ABBREVIATIONS and not re.fullmatch(r"[A-Z]\.", token)
+    return token.lower() not in ABBREVIATIONS and not re.fullmatch(r"(?:[A-Z]\.)+", token)
 
 
 def speech_cue(words):
     return {"start": words[0][0], "end": words[-1][1], "text": render(words), "source": "speech", "words": list(words)}
+
+
+def is_reveal(word):
+    """True for a word the editing pass marked as the start of a punchline: a cue must start there."""
+    return len(word) > 3 and word[3]
+
+
+def retime_stranded(words):
+    """Move the first words of a sentence to the speech they belong to when a long silence follows them.
+
+    Whisper sometimes times the words after a pause, or a laugh, as if they came before it, so they show at
+    the end of the previous line, seconds early. A sentence rarely stops for that long after two or three words."""
+    words = [list(word) for word in words]
+    for i in range(len(words) - 1):
+        if words[i + 1][0] - words[i][1] < STRANDED_GAP or ends_sentence(words[i][2]):
+            continue
+        first = i
+        while first > 0 and i - first < STRANDED_WORDS and not ends_sentence(words[first - 1][2]):
+            first -= 1
+        if first == 0 or i - first >= STRANDED_WORDS or words[i][1] - words[first][0] > STRANDED_SECONDS:
+            continue  # the sentence began further back, or these words took too long to be misplaced
+        shift = words[i + 1][0] - words[i][1] - MIN_GAP
+        for word in words[first:i + 1]:
+            word[0] += shift
+            word[1] += shift
+    return words
 
 
 def _pieces(words, max_chars):
@@ -80,6 +112,8 @@ def _pieces(words, max_chars):
         left = len(render(words[:i]))
         if left > max_chars:
             break
+        if JOINS_PREVIOUS.match(words[i][2]):
+            continue  # the rest of "laser -focused" or "$7 .36", as Whisper writes them
         last_fit = i
         if len(render(words[i:])) > (count - 1) * max_chars:
             continue
@@ -98,10 +132,10 @@ def resegment(words, max_chars=DEFAULT_MAX_CHARS):
 
     Sentences and pauses mark where a cue must end. A sentence too long for one cue is cut
     into even pieces. Quick interjections in a row ("Yes! Come on!") share a cue so they
-    do not flicker past."""
+    do not flicker past. A cue starts at any word marked as a reveal."""
     utterances, buf = [], []
-    for word in words:
-        if buf and word[0] - buf[-1][1] >= PAUSE_BREAK:
+    for word in retime_stranded(words):
+        if buf and (word[0] - buf[-1][1] >= PAUSE_BREAK or is_reveal(word)):
             utterances.append(buf)
             buf = []
         buf.append(word)
@@ -114,8 +148,8 @@ def resegment(words, max_chars=DEFAULT_MAX_CHARS):
     joined = []
     for utterance in utterances:
         previous = joined[-1] if joined else None
-        if (previous and utterance[0][0] - previous[-1][1] < 0.3 and len(render(previous)) <= 12
-                and len(render(previous + utterance)) <= max_chars * 0.67):
+        if (previous and not is_reveal(utterance[0]) and utterance[0][0] - previous[-1][1] < 0.3
+                and len(render(previous)) <= 12 and len(render(previous + utterance)) <= max_chars * 0.67):
             joined[-1] = previous + utterance
         else:
             joined.append(utterance)

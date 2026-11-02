@@ -10,7 +10,7 @@ VARIANTS = [
     ("04_vad_threshold_0.3", {"vad_parameters": {"threshold": 0.3, "min_silence_duration_ms": 1000}}),
     ("05_no_speech_0.8", {"no_speech_threshold": 0.8}),
     ("06_no_vad_no_speech_0.8", {"vad_filter": False, "no_speech_threshold": 0.8}),
-    ("07_no_previous_context", {"condition_on_previous_text": False}),
+    ("07_previous_context", {"condition_on_previous_text": True}),
 ]
 
 
