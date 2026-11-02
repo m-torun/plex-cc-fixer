@@ -4,7 +4,7 @@ import json
 import os
 import re
 
-from . import brief, captions, llm, media, plex, polish, speech, variants
+from . import brief, captions, llm, lyrics, media, plex, polish, shows, speech, variants
 
 
 def episode_code(path):
@@ -65,7 +65,7 @@ def researched(a, ts, code, ep, cues, claude):
     if os.path.exists(path) and not getattr(a, "refresh", False):
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    facts = brief.research(cues, identity(ts, code), claude)
+    facts = brief.research(cues, identity(ts, code), claude, shows.load(ts)["notes"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(facts, f, indent=1)
     return facts
@@ -83,7 +83,16 @@ def cmd_episode(a):
         except llm.LLMError as error:
             print(f"[research] failed, continuing without it: {error}")
             facts = {}
-        cues, changes = polish.polish(cues, reference, facts, claude)
+        if shows.load(ts)["lyrics"]:
+            def hear(start, end, artist):
+                return lyrics.listen(os.path.join(ep, "audio.flac"), start, end, os.path.join(ep, f"song-{start:.0f}.json"),
+                                     artist, a.model, a.threads)
+            cues = lyrics.place(cues, facts, reference, claude, hear)
+        try:
+            cues, changes = polish.polish(cues, reference, facts, claude, a.max_chars)
+        except llm.LLMError as error:
+            # Not attached: Plex would then refuse the edited one under the same name. A re-run reuses the transcript.
+            raise SystemExit(f"[polish] failed, nothing attached: {error}")
         with open(os.path.join(ep, f"changes.{label}.txt"), "w", encoding="utf-8") as f:
             for change in changes:
                 f.write(f"{captions.srt_ts(change['time'])} | {change['kind']} | {change['old']} -> {change['new']}\n")

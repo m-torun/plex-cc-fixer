@@ -65,11 +65,20 @@ SCHEMA = {
                             "additionalProperties": False,
                         },
                     },
+                    "songs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"artist": {"type": "string"}, "title": {"type": "string"}},
+                            "required": ["artist", "title"],
+                            "additionalProperties": False,
+                        },
+                    },
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "sources": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["kind", "start", "end", "know_before", "likely_known", "title", "premise", "whos_who",
-                             "confidence", "sources"],
+                             "songs", "confidence", "sources"],
                 "additionalProperties": False,
             },
         },
@@ -91,9 +100,9 @@ They found an earlier version of these notes spoiled the show: it summarised eac
 - know_before: a glossary of the real things the segment leans on that the viewer may not know: people, news stories, adverts, products and brands, programmes and films, songs, phrases, stereotypes, including ones that come up only in passing, such as a drink a character carries or a celebrity named in one line. List all of them. An earlier version that did so helped them get most of the jokes; a later one that kept only the most important few left them lost at the rest. Each entry names the thing and says what it is and what it is known for, in one sentence, two at most, the way a reference book would. Write nothing about the segment: not that it parodies or mentions the thing, not who plays whom, not what the joke is, and no "the sketch", "here" or "in this segment". Right: "Press Your Luck: a long-running American game show where contestants shout 'no whammies' while a board flashes prizes." Wrong: "The sketch parodies Press Your Luck." Wrong: "Her character keeps hitting whammies." Leave out what any adult anywhere would know, and leave out an entry only when its mere presence would give away a surprise, such as an unannounced guest. What the viewer very likely knows already goes in likely_known instead. A segment that leans on nothing gets an empty list.
 - likely_known: the things the segment leans on that the viewer very likely knows already, going by who they are as described above, such as a nationwide chain, a big brand or a household-name celebrity. A famous person's latest news, and anyone famous mainly online, go in know_before. They are listed anyway, just in case, under "You probably know these". Same form and the same rules as know_before. Each thing goes in one list only; when unsure whether the viewer knows it, put it in know_before.
 
-Two more fields are for the subtitle editor and are never shown to them, so they should say plainly what the segment is: premise (one line on what it is about) and whos_who (performer and who they play).
+Three more fields are for the subtitle editor and are never shown to them, so they should say plainly what the segment is: premise (one line on what it is about), whos_who (performer and who they play), and songs (for a music segment, the artist and title of each song performed, spelled as published; otherwise empty).
 
-The recording: {identity}. The file starts a little before the programme and includes the commercial breaks. Leave out the commercials and anything from other programmes before or after.
+{show_notes}The recording: {identity}. The file starts a little before the programme and includes the commercial breaks. Leave out the commercials and anything from other programmes before or after.
 
 Work like this:
 1. Search the web for this episode: the sketch list, recaps and reviews. Use them to name the segments and learn what each is about.
@@ -108,7 +117,7 @@ Also collect the names likely to be spoken (cast, host, guests, recurring charac
 
 What to return:
 - episode: the show, season and episode, air date, host, musical guest, the cast appearing, and the names to expect.
-- segments, in running order. For each: title; kind; start and end as H:MM:SS; know_before and likely_known (topic and explanation pairs); premise and whos_who for the editor; confidence; sources (the pages you relied on).
+- segments, in running order. For each: title; kind; start and end as H:MM:SS; know_before and likely_known (topic and explanation pairs); premise, whos_who and songs for the editor; confidence; sources (the pages you relied on).
 - notes: one or two sentences for the viewer about gaps in this sheet (a segment you could not place, a time you are unsure of, the recording stopping early), giving away nothing. Empty if none. Nothing else belongs there.
 
 The transcript, as time | text:
@@ -205,11 +214,13 @@ def viewer():
     return "The viewer is an adult who follows the news loosely."
 
 
-def research(cues, identity, claude, log=print):
+def research(cues, identity, claude, show_notes="", log=print):
     """Ask Claude, with web search, for the episode's facts and segment notes."""
     transcript = "\n".join(f"{srt_ts(cue['start'])[:8]} | {cue['text']}" for cue in cues)
-    facts = claude.ask(PROMPT.format(viewer=viewer(), identity=identity, transcript=transcript), SCHEMA, effort="high",
-                       tools=("WebSearch", "WebFetch"), timeout=2400)
+    notes = ("About this show in particular, from the viewer. Where this differs from the rules above, this wins:\n\n"
+             f"{show_notes}\n\n") if show_notes else ""
+    facts = claude.ask(PROMPT.format(viewer=viewer(), identity=identity, transcript=transcript, show_notes=notes),
+                       SCHEMA, effort="high", tools=("WebSearch", "WebFetch"), timeout=2400)
     for segment in facts.get("segments", []):
         segment["start_seconds"] = seconds(segment.get("start", ""))
         segment["end_seconds"] = seconds(segment.get("end", ""))

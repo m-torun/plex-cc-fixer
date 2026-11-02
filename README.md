@@ -11,7 +11,7 @@ The captions are time-corrected against the speech, and only the caption lines t
 
 Two optional steps use Claude through the [Claude Code](https://claude.com/claude-code) command line:
 
-- **An editing pass** fixes words the recogniser misheard (names above all) and splits cues so a punchline isn't on screen before it's spoken.
+- **An editing pass** restores punctuation and capitals, fixes words the recogniser misheard (names above all), and holds a punchline back so it isn't on screen before it's spoken. The cues are then cut again at the sentences it found.
 - **A cheat sheet** for the episode: what each segment refers to, researched on the web and written without spoilers, as a small web page for a phone.
 
 ## Requirements
@@ -57,7 +57,7 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
     --polish --variant v2 --site /path/to/site
 ```
 
-- `--polish` first researches the episode on the web (segments, cast, names), then sends the cues to Claude in stretches of about 90, together with the broadcast captions for the same stretch as a second witness. Claude returns word corrections and the cues to split; nothing else in the subtitle changes. Every change is listed in `work/<episode>/changes.<variant>.en.txt`.
+- `--polish` first researches the episode on the web (segments, cast, names), then sends the cues to Claude in stretches of about 90, together with the broadcast captions for the same stretch as a second witness. Claude returns the corrected text of each line that needs it, with punctuation, capitals, corrected words and a mark before a punchline. Words it kept keep their times, and the speech is cut into cues again from its punctuation. Every changed word and held-back punchline is listed in `work/<episode>/changes.<variant>.en.txt`; punctuation and capitals are not.
 - `--variant v2` names the result `S01E02.v2.en` in Plex and `subtitle.v2.en.srt` on disk, next to the plain version, so the two can be compared on the same episode.
 - `--site DIR` also writes the cheat sheet and a page listing the corrections into that folder, for the daemon to serve (see below).
 - `python3 -m plex_cc_fixer brief "<recording>" --site DIR` writes the cheat sheet without touching subtitles.
@@ -65,6 +65,15 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
 Answers from Claude are cached in `work/<episode>/llm/`, and the research in `research.json`, so a re-run costs nothing. `--refresh` redoes the research. The cheat sheet is best effort: it depends on recaps being published, and it can be wrong.
 
 The research starts from a description of the viewer, which decides what a sheet explains and what it lists apart under "You probably know these". It is read from `personal_details.md`, which git ignores; copy `personal_details.example.md` to it and describe the viewer there. Without it the generic example is used.
+
+### Instructions for one show
+
+`shows/<Show>.md`, named after the show's library folder without its year, holds what applies to that show alone. git ignores everything in that folder except `shows/example.md`, which describes the format.
+
+- The text goes into the research prompt and wins over the general rules there: what the show's segments are like, and what to explain or leave out in each.
+- `lyrics: true` at the top shows published lyrics during the show's music segments. The research names each song, the lyrics come from [LRCLIB](https://lrclib.net) (only the artist and title are sent), and Claude places them on the performance, since a live version can skip, repeat or change lines. Its evidence is the broadcast captions and a second Whisper pass over the song with the voice filter off, which takes about a minute per song and is kept in `work/<episode>/song-<start>.json`. The timing is an estimate. A song with no published lyrics keeps the cues it has.
+
+Research results are cached, so give an episode `--refresh` to apply a changed show file to it.
 
 ### The daemon
 
@@ -122,12 +131,12 @@ An uploaded subtitle lives inside Plex and other media servers can't see it. If 
 
 1. **Audio** is extracted from the recording as mono 16 kHz FLAC.
 2. **Captions** are decoded from the video stream with ffmpeg's `movie=...[out0+subcc]` filter and written as SRT.
-3. **Transcription** runs Whisper with word timestamps, cached to `words.json`.
-4. **Cue cutting**: each sentence becomes a cue that starts when its first word is spoken. A sentence longer than `--max-chars` is cut into the fewest pieces that fit, of even length, preferably after a comma. Quick interjections in a row share a cue.
+3. **Transcription** runs Whisper with word timestamps, cached to `words.json`. Each stretch is transcribed without the text before it as context, because Whisper fed its own unpunctuated text can stay unpunctuated for an hour.
+4. **Cue cutting**: each sentence becomes a cue that starts when its first word is spoken. A sentence longer than `--max-chars` is cut into the fewest pieces that fit, of even length, preferably after a comma. Quick interjections in a row share a cue. The first few words of a sentence followed by a long silence are moved up to the speech after it, since Whisper tends to time such words before a pause they came after.
 5. **Caption cleanup**: the rolling captions repeat earlier lines in each cue. Each line is kept once, at the time it first appeared.
 6. **Alignment**: speech words and caption words are matched with `difflib`. Each run of three or more matching words becomes an anchor that measures the caption delay at that point. The offsets are median-smoothed and interpolated, so the captions follow a delay that changes over the recording.
 7. **Fallback selection**: a caption line is used only if fewer than half of its words matched speech, and it doesn't overlap a speech cue. Sound tags such as `[APPLAUSE]` are only used within 4 seconds of speech.
-8. **Editing pass** (with `--polish`): Claude's word corrections are applied to the words they replace, keeping their timing, and the cues it marks are split at the word that starts the reveal.
+8. **Editing pass** (with `--polish`): songs get their lyrics if the show asks for them, Claude's text is applied to the timed words, and the speech is cut into cues again as in step 4, starting a new cue at each marked punchline.
 9. **Output**: speech cues and fallback cues are merged in time order and overlaps are trimmed. A cue longer than 42 characters (only with a larger `--max-chars`) is wrapped onto two lines at a space.
 
 `work/<episode>/fallback.txt` lists every caption-sourced cue, so you can check what was added.
@@ -148,7 +157,9 @@ plex_cc_fixer/
   captions.py   caption parsing, alignment, time correction, SRT writing
   speech.py     Whisper transcription, cue cutting, caption merge
   llm.py        runs the `claude` CLI and caches its answers
-  polish.py     the editing pass: prompt, word corrections, cue splits
+  polish.py     the editing pass: prompt, applying its text to the timed words, cutting cues again
+  lyrics.py     published lyrics for a show's songs, placed on the performance
+  shows.py      reads a show's own instructions from shows/
   brief.py      web research and the cheat sheet pages
   appletv.py    pause, play and jump on an Apple TV (pyatv)
   sheets.py     where the pages live in the site folder, and their shared style
@@ -158,6 +169,9 @@ plex_cc_fixer/
 deploy/
   plex-cc-fixer.service        systemd unit template for the daemon
   install.sh                   fills it in and installs it
+shows/
+  example.md                   the format of a show's own instructions; the others are ignored by git
+tests/                         python3 -m unittest discover -s tests -t .
 tools/
   live_check.py                tests the daemon against a real player
 ```

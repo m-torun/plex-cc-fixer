@@ -1,58 +1,50 @@
-"""Have Claude proofread the cues: fix misheard words and split cues so a punchline is not shown early."""
-import re
+"""Have Claude proofread the cues: words, punctuation and capitals, then cut them again at the sentences it found."""
+import difflib
 from concurrent.futures import ThreadPoolExecutor
 
 from .captions import norm, srt_ts
 from .llm import LLMError
-from .speech import render, settle, speech_cue
+from .speech import DEFAULT_MAX_CHARS, render, resegment, settle
 
 CHUNK_CUES = 90
 WORKERS = 3
+REVEAL = "|"  # in Claude's text, right before the first word of a punchline
+UNRELATED = 0.25  # a long cue sharing less than this with Claude's text was answered for another cue
+MAX_FAILED = 0.25  # the run fails if more than this share of the stretches gets no answer
 
 SCHEMA = {
     "type": "object",
     "properties": {
-        "fixes": {
+        "cues": {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "old": {"type": "string"},
-                    "new": {"type": "string"},
-                },
-                "required": ["id", "old", "new"],
-                "additionalProperties": False,
-            },
-        },
-        "breaks": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"id": {"type": "integer"}, "before": {"type": "string"}},
-                "required": ["id", "before"],
+                "properties": {"id": {"type": "integer"}, "text": {"type": "string"}},
+                "required": ["id", "text"],
                 "additionalProperties": False,
             },
         },
     },
-    "required": ["fixes", "breaks"],
+    "required": ["cues"],
     "additionalProperties": False,
 }
 
-PROMPT = """You are checking machine-made subtitles for one stretch of a TV recording before someone watches it.
+PROMPT = """You are the last editor of machine-made subtitles for one stretch of a TV recording, before someone watches it.
 
-How they were made: a speech recogniser transcribed the audio and the words were cut into short cues. It hears most things right, but it mishears names, brands, slang and words spoken through laughter, and writes something that sounds similar (for example "jay" for the cast member "Che"). The broadcaster's own closed captions for the same stretch are included as a second witness. A person typed those live, so their wording is usually right where the recogniser slipped, but they skip and paraphrase, contain typos of their own, and their times are only approximate.
+How they were made: a speech recogniser transcribed the audio and the words were cut into short lines. It hears most things right, but it mishears names, brands, slang and words spoken through laughter, and writes something that sounds similar (for example "jay" for the cast member "Che"). It also often leaves out punctuation and capitals, for long stretches at a time, and the lines were cut without knowing where its sentences end. The broadcaster's own closed captions for the same stretch are included as a second witness. A person typed those live, so their wording is usually right where the recogniser slipped, but they skip and paraphrase, contain typos of their own, and their times are only approximate.
 
 About the programme:
 {facts}
 
-There are two jobs.
+Read the lines one after another as continuous speech. A line can stop in the middle of a sentence, and a new sentence can start in the middle of a line; that is expected, and the lines are cut again from your punctuation afterwards. There are three jobs.
 
-1. Wrong words. Where the recogniser clearly wrote the wrong word or name, give the correction. Your evidence can be the captions, the facts above, or a sentence that makes no sense as written when a like-sounding word would. Change only what was misheard. Keep the speaker's own wording, grammar, slang and repetitions; do not tidy style or punctuation; do not add words that were not spoken. If you are not confident, leave it alone.
+1. Punctuation and capitals. Make the text read the way a professional subtitler would write it: a capital at the start of every sentence and on names, a full stop, question mark or exclamation mark at the end of every sentence, commas, apostrophes, numbers as usual. Do this everywhere it is wrong, even if that is nearly every line. The end of a sentence matters most: when a new sentence starts inside a line, end the previous one there and capitalise the first word of the new one. Every sentence must end, so that nothing runs on into the next thing said. Do not add a capital to a word just because a line starts with it.
 
-2. Punchline timing. A cue appears on screen all at once, at the moment its first word is spoken. When one cue holds both the end of a setup and the reveal (the punchline, the surprise word, the answer), the viewer reads the reveal before the performer says it, and the joke is spoiled. For such a cue, name the first word of the reveal so the cue can be split there and the reveal shown only when it is spoken. Mark only cues where this matters; most need nothing.
+2. Wrong words. Where the recogniser clearly wrote the wrong word or name, correct it. Your evidence can be the captions, the facts above, or a sentence that makes no sense as written when a like-sounding word would. Change only what was misheard. Keep the speaker's own wording, grammar, slang and repetitions; do not add words that were not spoken. If you are not confident about a word, leave it.
 
-The cues, as id | time | source | text. Source S came from speech recognition and can be corrected and split. Source C was copied from the captions; leave those as they are.
+3. Punchline timing. A line appears on screen all at once, at the moment its first word is spoken. When one line holds both the end of a setup and the reveal (the punchline, the surprise word, the answer), the viewer reads the reveal before the performer says it, and the joke is spoiled. Put {reveal} right before the first word of the reveal, so that the reveal is shown only when it is spoken. Mark only places where this matters; most lines need nothing, and never mark a line's first word.
+
+The lines, as id | time | source | text. Source S came from speech recognition. Source C was copied from the captions: give those the first job only, and leave their words alone.
 
 {cues}
 
@@ -60,9 +52,7 @@ The broadcaster's captions for this stretch, as time | text:
 
 {reference}
 
-Answer with two lists, either of which may be empty:
-- fixes: for each correction, the cue id, `old` (the exact words in that cue to replace, as few as possible) and `new` (what they should be).
-- breaks: for each split, the cue id and `before` (the exact word in that cue which starts the reveal; never the cue's first word)."""
+Answer with `cues`: for each line that needs any change, its id and its full new text. Leave out lines that are already right. Keep every word on the line it is on, in the same order, even when a sentence crosses to the next line."""
 
 
 def clock(seconds):
@@ -106,101 +96,131 @@ def facts_text(facts, start, end):
 
 def build_prompt(cues, first, last, reference, facts):
     start, end = cues[first]["start"], cues[last - 1]["end"]
+    # Sung lines placed from published lyrics are final; there is nothing to check in them.
     cue_lines = "\n".join(
         f"{i} | {clock(cues[i]['start'])} | {'S' if cues[i]['source'] == 'speech' else 'C'} | {cues[i]['text']}"
-        for i in range(first, last))
+        for i in range(first, last) if cues[i]["source"] != "lyrics")
     ref_lines = "\n".join(f"{clock(t)} | {text}" for t, text in reference if start - 12 <= t <= end + 12)
-    return PROMPT.format(facts=facts_text(facts, start, end), cues=cue_lines,
+    return PROMPT.format(facts=facts_text(facts, start, end), cues=cue_lines, reveal=REVEAL,
                          reference=ref_lines or "(none for this stretch)")
 
 
-def _strip(token):
-    """Split a word into leading punctuation, core and trailing punctuation."""
-    match = re.match(r"^(\W*)(.*?)(\W*)$", token, re.S)
-    return match.group(1), match.group(2), match.group(3)
+def read_text(text):
+    """Claude's text for a cue, as its words and the index of the word marked as the reveal (None if none)."""
+    tokens, reveal, pending = [], None, False
+    for token in text.split():
+        if token.startswith(REVEAL):
+            pending, token = True, token[len(REVEAL):]
+            if not token:
+                continue
+        if pending:
+            reveal, pending = len(tokens), False
+        tokens.append(token)
+    return tokens, reveal
 
 
-def apply_fix(cue, old, new):
-    """Replace the words `old` in a speech cue with `new`, keeping the timing of the span. Returns True if applied."""
-    words, target = cue["words"], [norm(t) for t in old.split() if norm(t)]
-    fresh = new.split()
-    if not target or not fresh or old.strip() == new.strip():
-        return False
-    for i in range(len(words) - len(target) + 1):
-        if [norm(w[2]) for w in words[i:i + len(target)]] != target:
+def apply_text(cue, text):
+    """Put Claude's text on a speech cue, keeping the timing of each word it kept.
+
+    Returns the corrected spans as (old words, new words) and whether a reveal was marked, or None for an
+    answer that cannot be for this cue."""
+    tokens, reveal = read_text(text)
+    old = [norm(word[2]) for word in cue["words"]]
+    new = [norm(token) for token in tokens]
+    if not tokens:
+        return None
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    if len(old) >= 6 and matcher.ratio() < UNRELATED:
+        return None
+    words, spans = [], []
+    for op, a, b, c, d in matcher.get_opcodes():
+        if op == "equal":
+            words.extend([word[0], word[1], token] for word, token in zip(cue["words"][a:b], tokens[c:d]))
             continue
-        lead = _strip(words[i][2])[0]
-        trail = _strip(words[i + len(target) - 1][2])[2]
-        if not _strip(fresh[0])[0]:
-            fresh[0] = lead + fresh[0]
-        if not _strip(fresh[-1])[2]:
-            fresh[-1] = fresh[-1] + trail
-        t0, t1 = words[i][0], words[i + len(target) - 1][1]
-        step = (t1 - t0) / len(fresh)
-        cue["words"][i:i + len(target)] = [[t0 + k * step, t0 + (k + 1) * step, token] for k, token in enumerate(fresh)]
-        cue["text"] = render(cue["words"])
-        return True
-    return False
+        if a < b:
+            t0, t1 = cue["words"][a][0], cue["words"][b - 1][1]
+        else:  # a word with no time of its own: right after the one before it, or at the start
+            t0 = t1 = words[-1][1] if words else cue["words"][0][0]
+        step = (t1 - t0) / max(1, d - c)
+        words.extend([t0 + k * step, t0 + (k + 1) * step, tokens[c + k]] for k in range(d - c))
+        spans.append((render(cue["words"][a:b]), " ".join(tokens[c:d])))
+    if not words:
+        return None
+    marked = False
+    if reveal is not None and 0 < reveal < len(words):
+        words[reveal] = words[reveal] + [True]
+        marked = True
+    cue["words"], cue["text"] = words, render(words)
+    return spans, marked
 
 
-def apply_break(cue, before):
-    """Split a speech cue at the word `before`. Returns the two cues, or None if the word is not there."""
-    target = norm(before.split()[0]) if before.split() else ""
-    for k in range(1, len(cue["words"])):
-        if target and norm(cue["words"][k][2]) == target:
-            return speech_cue(cue["words"][:k]), speech_cue(cue["words"][k:])
-    return None
+def apply_answer(cues, first, last, answer):
+    """Apply Claude's answer for one stretch. Returns the changes to list, the cues retouched and the answers refused."""
+    changes, retouched, rejected = [], 0, 0
+    for item in answer.get("cues", []):
+        i, text = item.get("id", -1), (item.get("text") or "").strip()
+        if not first <= i < last or not text or cues[i]["source"] == "lyrics":
+            rejected += 1
+            continue
+        cue, was = cues[i], cues[i]["text"]
+        if cue["source"] != "speech":
+            cue["text"] = " ".join(read_text(text)[0])  # no word times to keep, and nothing to split
+            retouched += cue["text"] != was
+            continue
+        applied = apply_text(cue, text)
+        if applied is None:
+            rejected += 1
+            continue
+        spans, marked = applied
+        retouched += cue["text"] != was
+        for old, new in spans:
+            changes.append({"time": cue["start"], "kind": "word", "old": old, "new": new, "was": was, "now": cue["text"]})
+        if marked:
+            at = next(k for k, word in enumerate(cue["words"]) if len(word) > 3)
+            left, right = render(cue["words"][:at]), render(cue["words"][at:])
+            changes.append({"time": cue["words"][at][0], "kind": "split", "old": cue["text"], "new": f"{left} / {right}",
+                            "was": was, "now": right})
+    return changes, retouched, rejected
 
 
-def polish(cues, reference, facts, claude, log=print):
-    """Ask Claude about each stretch, apply what it returns, and report every change.
+def polish(cues, reference, facts, claude, max_chars=DEFAULT_MAX_CHARS, log=print):
+    """Ask Claude about each stretch, apply what it returns, cut the speech into cues again at the sentences it
+    found, and report every change of words.
 
     Returns (cues, changes) where changes is a list of dicts for review.
     """
-    ranges = chunk_ranges(cues)
+    segments = facts.get("segments", [])
+    # A recording runs on either side of the programme, into local news and advertising nobody will read.
+    ranges = [(first, last) for first, last in chunk_ranges(cues) if not segments or any(
+        s.get("start_seconds", 0) < cues[last - 1]["end"] and s.get("end_seconds", 0) > cues[first]["start"] for s in segments)]
+    failures = []
 
     def ask(bounds):
         try:
             return claude.ask(build_prompt(cues, bounds[0], bounds[1], reference, facts), SCHEMA, effort="high")
         except LLMError as error:
             log(f"[polish] stretch {clock(cues[bounds[0]]['start'])} skipped: {error}")
-            return {"fixes": [], "breaks": []}
+            failures.append(str(error))
+            return {"cues": []}
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         answers = list(pool.map(ask, ranges))
 
-    changes, splits, rejected = [], {}, 0
-    for (first, last), answer in zip(ranges, answers):
-        for fix in answer.get("fixes", []):
-            i = fix.get("id", -1)
-            if not first <= i < last or cues[i]["source"] != "speech":
-                rejected += 1
-                continue
-            before_text = cues[i]["text"]
-            if apply_fix(cues[i], fix.get("old", ""), fix.get("new", "")):
-                changes.append({"time": cues[i]["start"], "kind": "word", "old": fix["old"], "new": fix["new"],
-                                "was": before_text, "now": cues[i]["text"]})
-            else:
-                rejected += 1
-        for brk in answer.get("breaks", []):
-            i = brk.get("id", -1)
-            if not first <= i < last or cues[i]["source"] != "speech" or i in splits:
-                rejected += 1
-                continue
-            parts = apply_break(cues[i], brk.get("before", ""))
-            if parts:
-                splits[i] = parts
-                changes.append({"time": parts[1]["start"], "kind": "split", "old": cues[i]["text"],
-                                "new": parts[0]["text"] + " / " + parts[1]["text"], "was": cues[i]["text"],
-                                "now": parts[1]["text"]})
-            else:
-                rejected += 1
+    # A few stretches can go unedited; a subtitle that was hardly edited at all should not pass for an edited one.
+    if len(failures) > len(ranges) * MAX_FAILED:
+        raise LLMError(f"{len(failures)} of {len(ranges)} stretches got no answer: {failures[0]}")
 
-    result = []
-    for i, cue in enumerate(cues):
-        result.extend(splits[i] if i in splits else [cue])
-    words = sum(1 for change in changes if change["kind"] == "word")
-    log(f"[polish] {len(ranges)} stretches: {words} words corrected, {len(splits)} cues split for timing, "
-        f"{rejected} suggestions not applicable")
+    changes, retouched, rejected = [], 0, 0
+    for (first, last), answer in zip(ranges, answers):
+        found, touched, refused = apply_answer(cues, first, last, answer)
+        changes += found
+        retouched += touched
+        rejected += refused
+
+    words = [word for cue in cues if cue["source"] == "speech" for word in cue["words"]]
+    result = resegment(words, max_chars) + [cue for cue in cues if cue["source"] != "speech"]
+    corrected = sum(1 for change in changes if change["kind"] == "word")
+    log(f"[polish] {len(ranges)} stretches: {retouched} lines retouched, {corrected} words corrected, "
+        f"{len(changes) - corrected} punchlines held back, {rejected} answers not applicable")
     changes.sort(key=lambda change: change["time"])
     return settle(result), changes
