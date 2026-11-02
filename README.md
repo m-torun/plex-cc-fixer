@@ -35,7 +35,7 @@ python3 -m plex_cc_fixer episode "/path/to/Show - S01E02 - Title.ts" \
     --prompt "Show Name, Guest Name, Musical Guest"
 ```
 
-This writes the working files to `work/S01E02/` and attaches `S01E02.en.srt` to the Plex item whose media file is that `.ts` path. Re-running the same command reuses the audio, caption extraction, and transcription, and it won't attach a subtitle that's already there.
+This writes the working files to `work/S01E02/` and attaches `S01E02.en.srt` to the Plex item whose media file is that `.ts` path. Re-running the same command reuses the audio, caption extraction, and transcription. A subtitle with the same name is left alone if its text is unchanged, and replaced if not.
 
 Useful options:
 
@@ -68,9 +68,9 @@ The research starts from a description of the viewer, which decides what a sheet
 
 ### Instructions for one show
 
-`shows/<Show>.md`, named after the show's library folder without its year, holds what applies to that show alone. git ignores everything in that folder except `shows/example.md`, which describes the format.
+`shows/<Show>.md`, named after the show's library folder without its year, holds what applies to that show alone. `shows/example.md` describes the format, and `shows/Saturday Night Live.md` is a real one.
 
-- The text goes into the research prompt and wins over the general rules there: what the show's segments are like, and what to explain or leave out in each.
+- The text goes into the research prompt and wins over the general rules there: what the show's segments are like, and what the viewer gets from them.
 - `lyrics: true` at the top shows published lyrics during the show's music segments. The research names each song, the lyrics come from [LRCLIB](https://lrclib.net) (only the artist and title are sent), and Claude places them on the performance, since a live version can skip, repeat or change lines. Its evidence is the broadcast captions and a second Whisper pass over the song with the voice filter off, which takes about a minute per song and is kept in `work/<episode>/song-<start>.json`. The timing is an estimate. A song with no published lyrics keeps the cues it has.
 
 Research results are cached, so give an episode `--refresh` to apply a changed show file to it.
@@ -98,6 +98,7 @@ A long-running service with an HTTP API and no page of its own. An interface tal
 - It needs the same Plex token and URL as the upload (`PLEX_TOKEN` or `--plex-token-file`, `--plex-url`), and the `claude` CLI for the editing pass and the cheat sheet.
 - It listens on `127.0.0.1` and has no login. `--listen 0.0.0.0` exposes it; then anyone who can reach the port can see what is being watched and start a job.
 - `--auto SHOW` (repeatable) starts the full job by itself for each new recording of that show, 15 minutes after Plex adds it and once Plex's commercial detection has finished. It looks every 5 minutes, runs each recording once (a failed job is not retried), and leaves alone recordings added before the option was first used; `<work>/jobs/auto.json` keeps track. It asks Plex rather than using Plex webhooks, which need setting up in the Plex account.
+- `--notify PROGRAM` runs that program when a job has finished or failed, with `JOB_STATE` (`done` or `failed`), `JOB_LABEL`, `JOB_MAKE` (`all` or `sheet`), `JOB_ERROR` and `JOB_SHEET` (the cheat sheet's URL path, if it has one) in its environment. A cancelled job runs nothing.
 - The server itself uses only the Python standard library. `deploy/install.sh` installs it as the systemd service `plex-cc-fixer`, running from the checkout as the user who runs the script, with its pages and work files in `~/plex-cc-fixer`. Its arguments go to the daemon, for example `deploy/install.sh --auto "Some Show"`; run it again to change them.
 - Plex for Apple TV takes no remote-control commands from Plex, so for a player on an Apple TV the daemon sends Pause, Play and jumps to the Apple TV itself, with [pyatv](https://pyatv.dev). Install pyatv with `python3 -m pip install --target DIR pyatv` and give the daemon `--pyatv DIR`. Pair once with `PYTHONPATH=DIR python3 -m plex_cc_fixer.appletv pair --host <Apple TV address>`: the TV shows a PIN to type in. The credentials go to `~/.config/plex-cc-fixer/appletv.json` (`--apple-tv-credentials`); keep that file private.
 - `tools/live_check.py` tests `/api/now` on a real player: it plays an item through Plex's remote-control protocol for a few seconds, checks that the daemon lists it, stops, and restores the watch state. The item shows on that player's screen while it runs.
@@ -170,7 +171,7 @@ deploy/
   plex-cc-fixer.service        systemd unit template for the daemon
   install.sh                   fills it in and installs it
 shows/
-  example.md                   the format of a show's own instructions; the others are ignored by git
+  example.md                   the format of a show's own instructions
 tests/                         python3 -m unittest discover -s tests -t .
 tools/
   live_check.py                tests the daemon against a real player

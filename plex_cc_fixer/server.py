@@ -18,6 +18,10 @@ plex_cc_fixer.appletv (Plex for Apple TV does not take them from Plex).
 With --auto SHOW, each new recording of that show gets the full job by itself once Plex has finished
 with it (recordings added before the option was first used are left alone).
 
+With --notify PROGRAM, PROGRAM runs when a job has finished or failed, with JOB_STATE (done or failed),
+JOB_LABEL, JOB_MAKE (all or sheet), JOB_ERROR and JOB_SHEET (the cheat sheet's URL path, if it has one) in its
+environment.
+
 An interface (plex-buddy) talks to this. It listens on 127.0.0.1 by default and has no
 login. Standard library only; generation runs the pipeline as a separate process.
 """
@@ -62,6 +66,7 @@ STEPS = {
 TRANSCRIBED = {"all": 0.6, "sheet": 0.8}  # how far along a run is when transcription ends
 AUTO_CHECK = 300   # seconds between looks for new recordings of the --auto shows
 AUTO_SETTLE = 900  # seconds after a recording is added before its job starts; Plex's commercial detection goes first
+NOTIFY_SECONDS = 300  # how long the --notify program may run
 
 
 def episode_name(item):
@@ -101,9 +106,9 @@ class Cached:
 class Jobs:
     """Runs the pipeline for one recording at a time and remembers how each run went."""
 
-    def __init__(self, work, site, threads=3, finished=lambda job: None, plex_args=()):
+    def __init__(self, work, site, threads=3, finished=lambda job: None, plex_args=(), notify=None):
         self.work, self.site, self.threads, self.finished = work, site, threads, finished
-        self.plex_args = list(plex_args)
+        self.plex_args, self.notify = list(plex_args), notify
         self.folder = os.path.join(work, "jobs")
         os.makedirs(self.folder, exist_ok=True)
         self.history = os.path.join(self.folder, "history.json")
@@ -118,7 +123,24 @@ class Jobs:
         for job in self.jobs:  # whatever was under way when the daemon last stopped did not finish
             if job["state"] in ("queued", "running"):
                 job.update(state="failed", error="The service was restarted while this was running.", finished=time.time())
+                self.tell(job)
         threading.Thread(target=self.worker, daemon=True).start()
+
+    def tell(self, job):
+        """Run the --notify program for a job that has finished or failed, without waiting for it."""
+        if not self.notify or job["state"] not in ("done", "failed"):
+            return
+        env = dict(os.environ, JOB_STATE=job["state"], JOB_LABEL=job["label"], JOB_MAKE=job.get("make", "all"),
+                   JOB_ERROR=job.get("error") or "", JOB_SHEET=sheets.sheet_for(self.site, job["file"]) or "")
+
+        def run():
+            try:
+                subprocess.run([self.notify], env=env, check=True, timeout=NOTIFY_SECONDS, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"[notify] {error}", flush=True)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def save(self):
         self.jobs = self.jobs[-KEPT_JOBS:]
@@ -217,6 +239,7 @@ class Jobs:
                 job["finished"] = time.time()
             self.save()
         self.finished(job)
+        self.tell(job)
 
     def follow(self, job, line):
         """Move the job's step and progress along from one line of the pipeline's log."""
@@ -238,11 +261,11 @@ class Jobs:
 
 
 class Daemon:
-    def __init__(self, client, site, work, threads, plex_args=(), apple_tv=appletv.CREDENTIALS, pyatv=None):
+    def __init__(self, client, site, work, threads, plex_args=(), apple_tv=appletv.CREDENTIALS, pyatv=None, notify=None):
         self.client, self.site = client, site
         self.apple_tv, self.pyatv = apple_tv, pyatv  # pairing credentials file, and where pyatv is installed
         self.subtitles = {}  # ratingKey -> (has a subtitle, when asked)
-        self.jobs = Jobs(work, site, threads, self.job_finished, plex_args)
+        self.jobs = Jobs(work, site, threads, self.job_finished, plex_args, notify)
         self.now = Cached(self.read_now, 2.0)
         self.recent = Cached(self.read_recent, 20.0)
 
@@ -456,11 +479,11 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def serve(site, work, port=8766, listen="127.0.0.1", plex_url="http://localhost:32400", token_file=None, threads=3,
-          auto=(), apple_tv=appletv.CREDENTIALS, pyatv=None):
+          auto=(), apple_tv=appletv.CREDENTIALS, pyatv=None, notify=None):
     client = plex.PlexClient(plex_url, plex.load_token(token_file))
     server = ThreadingHTTPServer((listen, port), functools.partial(Handler, directory=site))
     plex_args = ["--plex-url", plex_url] + (["--plex-token-file", token_file] if token_file else [])
-    server.app = Daemon(client, site, work, threads, plex_args, apple_tv, pyatv)
+    server.app = Daemon(client, site, work, threads, plex_args, apple_tv, pyatv, notify)
     if auto:
         Auto(server.app, auto, server.app.jobs.folder)
     print(f"plex-cc-fixer API on http://{listen}:{port}/ (pages from {site}, work in {work})", flush=True)
@@ -481,10 +504,11 @@ def main(argv=None):
     p.add_argument("--apple-tv-credentials", default=appletv.CREDENTIALS, metavar="FILE",
                    help="pairing credentials of Apple TVs (see plex_cc_fixer.appletv); default %(default)s")
     p.add_argument("--pyatv", metavar="DIR", help="folder pyatv was installed into with pip --target, if not on the path")
+    p.add_argument("--notify", metavar="PROGRAM", help="run this when a job has finished or failed; see the top of this file")
     a = p.parse_args(argv)
     sys.stderr.reconfigure(line_buffering=True)  # Python 3.8 holds back request log lines under systemd otherwise
     serve(a.site, a.work, a.port, a.listen, a.plex_url, a.plex_token_file, a.threads, a.auto,
-          os.path.expanduser(a.apple_tv_credentials), a.pyatv)
+          os.path.expanduser(a.apple_tv_credentials), a.pyatv, a.notify)
 
 
 if __name__ == "__main__":

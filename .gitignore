@@ -5,6 +5,4 @@ work/
 *.srt
 .DS_Store
 personal_details.md
-shows/*
-!shows/example.md
 deploy/.unit

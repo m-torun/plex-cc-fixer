@@ -135,28 +135,47 @@ class PlexClient:
                 return Player(entry.get("host"), entry.get("port"), client_id, entry.get("name") or "", roku)
         return None
 
-    def subtitle_titles(self, rating_key):
-        root = self._get_xml(f"/library/metadata/{rating_key}")
-        return {s.get("title") for s in root.iter("Stream") if s.get("streamType") == "3"}
-
     def attach_srt(self, media_path, srt_path, stream_title, log=print, key=None):
-        """Attach an SRT to the Plex item whose media file is media_path. Skips if already attached."""
+        """Attach an SRT to the Plex item whose media file is media_path, in place of any older text under the same
+        title. Skips if the same text is attached already."""
         key = key or self.find_rating_key(media_path)
         if not key:
             raise SystemExit(f"no Plex item found whose media file is {media_path}")
         plex_title = stream_title[:-len(".srt")] if stream_title.endswith(".srt") else stream_title
-        if plex_title in self.subtitle_titles(key):
+        with open(srt_path, "rb") as f:
+            text = f.read()
+
+        def same_title():
+            return [s for s in self.uploaded_subtitles(key) if s["title"] == plex_title]
+
+        older = same_title()
+        if any(self.fetch(s["key"]).strip() == text.strip() for s in older):
             log(f"[plex] {plex_title} already attached to ratingKey {key}; skipping")
             return key
-        url = self._url(f"/library/metadata/{key}/subtitles", {"title": stream_title, "format": "srt"})
-        with open(srt_path, "rb") as f:
-            req = urllib.request.Request(url, data=f.read(), method="POST",
-                                         headers={"Content-Type": "text/plain"})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            log(f"[plex] uploaded {plex_title} to ratingKey {key} (HTTP {r.status})")
-        if plex_title not in self.subtitle_titles(key):
+        status = self._send(f"/library/metadata/{key}/subtitles", {"title": stream_title, "format": "srt"}, text,
+                            headers={"Content-Type": "text/plain"})
+        log(f"[plex] uploaded {plex_title} to ratingKey {key} (HTTP {status})")
+        # Plex may list the upload beside the older one or put it in its place; only the new text may be left.
+        fresh = [s for s in same_title() if self.fetch(s["key"]).strip() == text.strip()]
+        if not fresh:
             raise SystemExit("upload accepted but the subtitle is not visible in Plex metadata")
+        for stream in older:
+            if stream["id"] != fresh[0]["id"]:
+                self._send(f"/library/streams/{stream['id']}", method="DELETE", timeout=30)
+                log(f"[plex] removed the older {plex_title}")
+        if any(s["selected"] for s in older) and not any(s["selected"] for s in same_title()):
+            self.select_subtitle(key, fresh[0]["id"])
         return key
+
+    def select_subtitle(self, rating_key, stream_id):
+        for part in self._get_xml(f"/library/metadata/{rating_key}", timeout=10).iter("Part"):
+            self._send(f"/library/parts/{part.get('id')}", {"subtitleStreamID": stream_id, "allParts": 1},
+                       method="PUT", timeout=10)
+
+    def _send(self, path, params=None, data=None, method="POST", headers=None, timeout=120):
+        request = urllib.request.Request(self._url(path, params), data=data, method=method, headers=headers or {})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
 
 
 class PlayerError(RuntimeError):

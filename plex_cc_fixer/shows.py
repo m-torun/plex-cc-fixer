@@ -1,7 +1,7 @@
 """What the owner of a library has to say about one show, from a file of their own.
 
 The code knows no show. shows/<Show>.md, named after the show's folder in the library without its year, holds what
-applies to that show alone. git ignores everything there but example.md, which describes the format.
+applies to that show alone. example.md describes the format.
 """
 import os
 import re
