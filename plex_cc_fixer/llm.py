@@ -2,17 +2,43 @@
 
 Uses whatever login the installed `claude` already has; no API key is involved.
 """
+import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
+import time
 
 DEFAULT_MODEL = "claude-opus-5-5"
+LIMIT = re.compile(r"hit your .*limit|usage limit|rate limit", re.I)
+LIMIT_RESETS = re.compile(r"resets\s+(?:.*?\s)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", re.I)
+LIMIT_MARGIN = 60          # seconds to wait past the reset
+LIMIT_JUST_PASSED = 300    # a reset this many seconds ago is today's, not tomorrow's
+LIMIT_UNKNOWN = 1800       # seconds between tries when the message gives no reset time
+LIMIT_WAIT_MAX = 24 * 3600  # seconds one call may wait before the run gives up on it
 
 
 class LLMError(RuntimeError):
     pass
+
+
+class LimitReached(LLMError):
+    """The account's usage limit; waiting is all it takes."""
+
+
+def seconds_until_reset(message, now):
+    """How long to wait for a limit, from Claude's message ("... resets 8:20pm (UTC)") and the time on this machine,
+    which is the clock the message speaks in."""
+    match = LIMIT_RESETS.search(message)
+    if not match:
+        return LIMIT_UNKNOWN
+    hour = int(match.group(1)) % 12 + (12 if match.group(3).lower() == "pm" else 0)
+    reset = now.replace(hour=hour, minute=int(match.group(2) or 0), second=0, microsecond=0)
+    if (now - reset).total_seconds() > LIMIT_JUST_PASSED:
+        reset += datetime.timedelta(days=1)
+    return max(0, (reset - now).total_seconds()) + LIMIT_MARGIN
 
 
 def find_cli():
@@ -28,11 +54,30 @@ class Claude:
         self.cache_dir = cache_dir
         self.model = model
         self.log = log
+        self.sleep = time.sleep
         self.cost = 0.0
         os.makedirs(cache_dir, exist_ok=True)
 
     def ask(self, prompt, schema, effort="high", tools=(), timeout=1500):
-        """Send one prompt and return the object matching `schema`. Answers are cached by prompt."""
+        """Send one prompt and return the object matching `schema`. Answers are cached by prompt.
+
+        At the account's usage limit it waits for the reset and tries again, as often as it takes up to LIMIT_WAIT_MAX."""
+        waited = 0
+        while True:
+            try:
+                return self._ask(prompt, schema, effort, tools, timeout)
+            except LimitReached as error:
+                wait = seconds_until_reset(str(error), datetime.datetime.now())
+                if waited + wait > LIMIT_WAIT_MAX:
+                    raise
+                reset = LIMIT_RESETS.search(str(error))
+                when = str(error)[reset.start():] if reset else "gives no reset time"
+                self.log(f"[limit] Waiting for Claude's usage limit, which {when}")
+                self.sleep(wait)
+                waited += wait
+                self.log("[limit] Working again after Claude's usage limit")
+
+    def _ask(self, prompt, schema, effort, tools, timeout):
         key = hashlib.sha1(json.dumps([self.model, effort, sorted(tools), schema, prompt]).encode()).hexdigest()
         cached = os.path.join(self.cache_dir, key + ".json")
         if os.path.exists(cached):
@@ -59,7 +104,10 @@ class Claude:
             raise LLMError(f"claude returned no JSON (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:300]}")
         self.cost += reply.get("total_cost_usd") or 0.0
         if reply.get("is_error"):
-            raise LLMError(f"claude reported an error: {str(reply.get('result'))[:300]}")
+            message = str(reply.get("result"))[:300]
+            if LIMIT.search(message):
+                raise LimitReached(message)
+            raise LLMError(f"claude reported an error: {message}")
         answer = reply.get("structured_output")
         if answer is None:
             try:

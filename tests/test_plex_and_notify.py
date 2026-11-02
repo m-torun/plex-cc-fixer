@@ -119,6 +119,22 @@ class Notify(unittest.TestCase):
         server.Jobs(self.folder, self.folder, notify=self.program)
         self.assertEqual(self.lines(1), ["failed|Show · S1E1|all|The service was restarted while this was running.|"])
 
+    def test_a_wait_for_the_limit_is_told_once_and_the_job_stays_running(self):
+        jobs = server.Jobs(self.folder, self.folder, notify=self.program)
+        job = self.job("running", duration=100)
+        waiting = "[limit] Waiting for Claude's usage limit, which resets 8:20pm (UTC)\n"
+        for _ in range(3):  # one line from each call that met the limit
+            jobs.follow(job, waiting)
+        self.assertEqual(self.lines(1), ["waiting|Show · S1E1|all|Waiting for Claude's usage limit, which resets 8:20pm (UTC)|"])
+        time.sleep(0.2)
+        self.assertEqual(len(self.lines(1)), 1)
+        self.assertEqual(job["state"], "running")
+        self.assertIn("Waiting", job["step"])
+        jobs.follow(job, "[limit] Working again after Claude's usage limit\n")
+        self.assertIn("Working again", job["step"])
+        jobs.follow(job, "[polish] 20 stretches\n")
+        self.assertEqual(job["step"], "Writing the cheat sheet")
+
     def test_a_program_that_fails_does_no_harm(self):
         jobs = server.Jobs(self.folder, self.folder, notify="/does/not/exist")
         jobs.tell(self.job("done"))

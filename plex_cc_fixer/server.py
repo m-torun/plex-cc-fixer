@@ -18,9 +18,9 @@ plex_cc_fixer.appletv (Plex for Apple TV does not take them from Plex).
 With --auto SHOW, each new recording of that show gets the full job by itself once Plex has finished
 with it (recordings added before the option was first used are left alone).
 
-With --notify PROGRAM, PROGRAM runs when a job has finished or failed, with JOB_STATE (done or failed),
-JOB_LABEL, JOB_MAKE (all or sheet), JOB_ERROR and JOB_SHEET (the cheat sheet's URL path, if it has one) in its
-environment.
+With --notify PROGRAM, PROGRAM runs when a job has finished or failed, or stops to wait for Claude's usage limit,
+with JOB_STATE (done, failed or waiting), JOB_LABEL, JOB_MAKE (all or sheet), JOB_ERROR (for waiting, what it is
+waiting for) and JOB_SHEET (the cheat sheet's URL path, if it has one) in its environment.
 
 An interface (plex-buddy) talks to this. It listens on 127.0.0.1 by default and has no
 login. Standard library only; generation runs the pipeline as a separate process.
@@ -67,6 +67,7 @@ TRANSCRIBED = {"all": 0.6, "sheet": 0.8}  # how far along a run is when transcri
 AUTO_CHECK = 300   # seconds between looks for new recordings of the --auto shows
 AUTO_SETTLE = 900  # seconds after a recording is added before its job starts; Plex's commercial detection goes first
 NOTIFY_SECONDS = 300  # how long the --notify program may run
+LIMIT_MARKER = "[limit]"  # the pipeline's log lines about Claude's usage limit
 
 
 def episode_name(item):
@@ -126,12 +127,13 @@ class Jobs:
                 self.tell(job)
         threading.Thread(target=self.worker, daemon=True).start()
 
-    def tell(self, job):
-        """Run the --notify program for a job that has finished or failed, without waiting for it."""
-        if not self.notify or job["state"] not in ("done", "failed"):
+    def tell(self, job, waiting=None):
+        """Run the --notify program for a job that has finished, failed or stopped to wait, without waiting for it."""
+        if not self.notify or not (waiting or job["state"] in ("done", "failed")):
             return
-        env = dict(os.environ, JOB_STATE=job["state"], JOB_LABEL=job["label"], JOB_MAKE=job.get("make", "all"),
-                   JOB_ERROR=job.get("error") or "", JOB_SHEET=sheets.sheet_for(self.site, job["file"]) or "")
+        env = dict(os.environ, JOB_STATE="waiting" if waiting else job["state"], JOB_LABEL=job["label"],
+                   JOB_MAKE=job.get("make", "all"), JOB_ERROR=waiting or job.get("error") or "",
+                   JOB_SHEET=sheets.sheet_for(self.site, job["file"]) or "")
 
         def run():
             try:
@@ -247,6 +249,12 @@ class Jobs:
             if job["state"] != "running":
                 return
             make = job.get("make", "all")
+            if line.startswith(LIMIT_MARKER):
+                # "[limit] Waiting for ...", from each of the calls that met the limit, and "[limit] Working again ...".
+                job["step"] = line[len(LIMIT_MARKER):].strip()
+                if job["step"].startswith("Waiting") and job.get("told") != job["step"]:
+                    job["told"] = job["step"]
+                    self.tell(job, job["step"])
             for marker, step, progress in STEPS[make]:
                 if line.startswith(marker):
                     job["step"] = step
