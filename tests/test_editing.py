@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from plex_cc_fixer import llm, lyrics, polish, shows, speech
+from plex_cc_fixer import brief, cli, llm, lyrics, polish, shows, speech
 
 
 def speech_cue(*spoken):
@@ -244,14 +244,41 @@ class Shows(unittest.TestCase):
     def test_options_and_notes_are_read(self):
         self.write("Some Show.md", "---\nlyrics: true\n---\n<!-- a remark -->\nExplain little.\n")
         self.assertEqual(shows.load("/tv/Some Show (1975)/Season 1/a.ts", self.folder),
-                         {"notes": "Explain little.", "lyrics": True})
+                         {"notes": "Explain little.", "lyrics": True, "lead_in": None})
 
     def test_a_show_with_no_file_gets_nothing(self):
-        self.assertEqual(shows.load("/tv/Other (2001)/Season 1/a.ts", self.folder), {"notes": "", "lyrics": False})
+        self.assertEqual(shows.load("/tv/Other (2001)/Season 1/a.ts", self.folder), {"notes": "", "lyrics": False, "lead_in": None})
 
     def test_a_file_without_options_is_all_notes(self):
         self.write("Some Show.md", "Explain little.\n")
-        self.assertEqual(shows.load("/tv/Some Show/Season 1/a.ts", self.folder), {"notes": "Explain little.", "lyrics": False})
+        self.assertEqual(shows.load("/tv/Some Show/Season 1/a.ts", self.folder),
+                         {"notes": "Explain little.", "lyrics": False, "lead_in": None})
+
+    def test_a_lead_in_is_read(self):
+        self.write("Some Show.md", "---\nlead_in: 10\n---\n")
+        self.assertEqual(shows.load("/tv/Some Show/Season 1/a.ts", self.folder)["lead_in"], 10.0)
+
+    def test_a_lead_in_that_is_not_a_number_is_ignored(self):
+        self.write("Some Show.md", "---\nlead_in: soon\n---\n")
+        self.assertIsNone(shows.load("/tv/Some Show/Season 1/a.ts", self.folder)["lead_in"])
+
+
+class Pages(unittest.TestCase):
+    def facts(self):
+        return {"episode": {"show": "Some Show"}, "segments": [{"title": "Cold open", "kind": "cold open", "start_seconds": 100,
+                                                               "end_seconds": 400, "know_before": [], "likely_known": []}]}
+
+    def test_the_play_button_starts_the_lead_in_before_the_segment(self):
+        self.assertIn('data-at="97"', brief.render_brief("S1E1", self.facts()))
+        self.assertIn('data-at="90"', brief.render_brief("S1E1", self.facts(), lead_in=10))
+
+    def test_pages_are_written_again_with_the_lead_in_of_their_show(self):
+        site = tempfile.mkdtemp()
+        media = "/tv/Saturday Night Live (1975)/Season 52/Saturday Night Live (1975) - S52E04 - A Host.ts"
+        page = brief.write_site(site, media, "S52E04", self.facts())
+        self.assertIn('data-at="97"', open(page, encoding="utf-8").read())
+        cli.main(["pages", "--site", site])
+        self.assertIn('data-at="90"', open(page, encoding="utf-8").read())
 
 
 if __name__ == "__main__":

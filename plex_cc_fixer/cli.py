@@ -59,6 +59,12 @@ def prepare(a):
     return ts, code, ep, cues, fallback, reference
 
 
+def lead_in(path):
+    """How many seconds before a segment its Play button starts, for the show this recording belongs to."""
+    seconds = shows.load(path)["lead_in"]
+    return brief.LEAD_IN if seconds is None else seconds
+
+
 def researched(a, ts, code, ep, cues, claude):
     """Return the episode's researched facts, from the episode folder if already done."""
     path = os.path.join(ep, "research.json")
@@ -97,7 +103,7 @@ def cmd_episode(a):
             for change in changes:
                 f.write(f"{captions.srt_ts(change['time'])} | {change['kind']} | {change['old']} -> {change['new']}\n")
         if a.site and facts:
-            print(f"[site] {brief.write_site(a.site, ts, code, facts, changes)}")
+            print(f"[site] {brief.write_site(a.site, ts, code, facts, changes, lead_in(ts))}")
         print(f"[llm] reported cost of this run: ${claude.cost:.2f}")
 
     out = os.path.join(ep, f"subtitle.{label}.srt")
@@ -143,8 +149,24 @@ def cmd_brief(a):
         ts, code, ep, cues, _, _ = prepare(a)
     claude = llm.Claude(os.path.join(ep, "llm"), model=a.llm_model)
     facts = researched(a, ts, code, ep, cues, claude)
-    print(f"[site] {brief.write_site(a.site, ts, code, facts)}")
+    print(f"[site] {brief.write_site(a.site, ts, code, facts, lead_in=lead_in(ts))}")
     print(f"[llm] reported cost of this run: ${claude.cost:.2f}")
+
+
+def cmd_pages(a):
+    """Write every cheat sheet page again from the facts saved beside it, with the show files as they are now."""
+    count = 0
+    for folder, _, files in os.walk(a.site):
+        for name in sorted(files):
+            if not name.endswith(".json") or not os.path.isfile(os.path.join(folder, name[:-5] + ".html")):
+                continue
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                facts = json.load(f)
+            # The site mirrors the library, so the page's own path stands in for the recording's.
+            media = os.path.join(folder, name[:-5] + ".ts")
+            brief.write_site(a.site, media, facts.get("code", ""), facts, lead_in=lead_in(media))
+            count += 1
+    print(f"[site] {count} pages written again")
 
 
 def cmd_serve(a):
@@ -201,6 +223,11 @@ def main(argv=None):
     add_recording_arguments(br)
     br.add_argument("--site", required=True, help="folder to write the pages into; serve it with any static web server")
     br.set_defaults(func=cmd_brief)
+
+    pg = sub.add_parser("pages", help="write every cheat sheet page again from its saved facts, for a changed show "
+                                      "file or page layout; no transcribing, no Claude")
+    pg.add_argument("--site", required=True, help="folder holding the cheat sheet pages")
+    pg.set_defaults(func=cmd_pages)
 
     sv = sub.add_parser("serve", help="the daemon: an API for interfaces, the cheat sheet pages, generation jobs")
     sv.add_argument("--site", required=True, help="folder holding the cheat sheet pages")

@@ -17,8 +17,9 @@ def show_name(path):
 
 
 def load(path, folder=FOLDER):
-    """A recording's show file as {"notes": text for the research prompt, "lyrics": bool}; empty when it has none."""
-    show = {"notes": "", "lyrics": False}
+    """A recording's show file as {"notes": text for the research prompt, "lyrics": bool, "lead_in": seconds or None};
+    empty when it has none."""
+    show = {"notes": "", "lyrics": False, "lead_in": None}
     try:
         with open(os.path.join(folder, show_name(path) + ".md"), encoding="utf-8") as f:
             text = f.read()
@@ -31,5 +32,10 @@ def load(path, folder=FOLDER):
             key, _, value = line.partition(":")
             if key.strip() == "lyrics":
                 show["lyrics"] = value.strip().lower() in ("true", "yes", "on")
+            elif key.strip() == "lead_in":
+                try:
+                    show["lead_in"] = max(0.0, float(value))
+                except ValueError:
+                    pass
     show["notes"] = re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
     return show

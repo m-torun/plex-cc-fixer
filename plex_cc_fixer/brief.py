@@ -11,7 +11,7 @@ from .sheets import clock, page, relative_page
 
 KINDS = ["cold open", "monologue", "sketch", "pretaped", "news desk", "music", "interview", "goodnights", "other"]
 
-LEAD_IN = 3  # seconds before a segment's start that its Play button jumps to
+LEAD_IN = 3  # seconds before a segment's start that its Play button jumps to, unless the show's file says otherwise
 # Who watches, in the research prompt's words: personal_details.md beside the package, which git ignores,
 # or the generic example kept in the repository.
 DETAILS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "personal_details.md")
@@ -234,7 +234,7 @@ def shown_name(segment):
     return segment.get("title") or segment.get("kind", "")
 
 
-def render_brief(code, facts, changes_page=None):
+def render_brief(code, facts, changes_page=None, lead_in=LEAD_IN):
     e = html.escape
     episode = facts.get("episode", {})
     heading = " · ".join(x for x in (episode.get("show"), code) if x)
@@ -245,7 +245,7 @@ def render_brief(code, facts, changes_page=None):
     segments = facts.get("segments", [])
 
     def jump(segment, text):
-        at = max(0, segment.get("start_seconds", 0) - LEAD_IN)
+        at = max(0, segment.get("start_seconds", 0) - lead_in)
         return (f"<span class=\"controls\"><button class=\"pause\" disabled>Pause</button>"
                 f"<button class=\"jump\" data-at=\"{at:.0f}\" disabled>{text}</button></span>")
 
@@ -314,7 +314,7 @@ def render_changes(code, changes, sheet_page):
     return page(f"{code}: subtitle corrections", body)
 
 
-def write_site(site, media_path, code, facts, changes=None):
+def write_site(site, media_path, code, facts, changes=None, lead_in=LEAD_IN):
     """Write the episode's pages into `site`, at the place that mirrors the media file's place in the library."""
     base = os.path.join(site, relative_page(media_path))
     os.makedirs(os.path.dirname(base), exist_ok=True)
@@ -327,5 +327,5 @@ def write_site(site, media_path, code, facts, changes=None):
     # A run that makes the sheet alone keeps the link to the corrections page an earlier subtitle run wrote.
     linked = name + ".changes.html" if os.path.exists(base + ".changes.html") else None
     with open(base + ".html", "w", encoding="utf-8") as f:
-        f.write(render_brief(code, facts, linked))
+        f.write(render_brief(code, facts, linked, lead_in))
     return base + ".html"

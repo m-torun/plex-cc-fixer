@@ -73,7 +73,9 @@ The research starts from a description of the viewer, which decides what a sheet
 - The text goes into the research prompt and wins over the general rules there: what the show's segments are like, and what the viewer gets from them.
 - `lyrics: true` at the top shows published lyrics during the show's music segments. The research names each song, the lyrics come from [LRCLIB](https://lrclib.net) (only the artist and title are sent), and Claude places them on the performance, since a live version can skip, repeat or change lines. Its evidence is the broadcast captions and a second Whisper pass over the song with the voice filter off, which takes about a minute per song and is kept in `work/<episode>/song-<start>.json`. The timing is an estimate. A song with no published lyrics keeps the cues it has.
 
-Research results are cached, so give an episode `--refresh` to apply a changed show file to it.
+- `lead_in: 10` makes the cheat sheet's Play buttons start that many seconds before a segment, instead of 3.
+
+Research results are cached, so give an episode `--refresh` to apply a changed show file to its research. `python3 -m plex_cc_fixer pages --site DIR` writes every cheat sheet page again from the facts saved beside it, which is enough for `lead_in`, and needs no Claude.
 
 ### The daemon
 
